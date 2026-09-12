@@ -205,3 +205,7 @@ producción sirve esta aplicación.
 | `Ctrl/⌘ + Espacio`    | Sugerencias                   |
 | `Tab`                 | Indentar                      |
 | `Ctrl/⌘ + F`          | Buscar en el código           |
+
+---
+
+Despliegue: cada push a `main` construye producción en Vercel.
