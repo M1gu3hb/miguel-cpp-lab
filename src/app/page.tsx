@@ -1,24 +1,34 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import CodeEditor from "@/components/CodeEditor";
 import { formatDate } from "@/lib/format";
 import { STATUS_LABELS, type Submission } from "@/lib/types";
 
-const CONSOLE_PLACEHOLDER = "La consola aparecerá aquí.";
+type RunState = {
+  status: string;
+  statusLabel: string;
+  console: string;
+  exitCode: number | null;
+  timeMs: number | null;
+  compiler: string;
+};
 
 export default function StudentPage() {
   const [code, setCode] = useState("");
   const [title, setTitle] = useState("");
   const [stdin, setStdin] = useState("");
-  const [output, setOutput] = useState(CONSOLE_PLACEHOLDER);
+  const [run, setRun] = useState<RunState | null>(null);
   const [running, setRunning] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [loadingList, setLoadingList] = useState(true);
   const [openId, setOpenId] = useState<string | null>(null);
+
+  // El handler vive en una ref para que el atajo del editor siempre vea el estado actual.
+  const runRef = useRef<() => void>(() => {});
 
   const loadSubmissions = useCallback(async () => {
     setLoadingList(true);
@@ -41,14 +51,20 @@ export default function StudentPage() {
     void loadSubmissions();
   }, [loadSubmissions]);
 
-  async function handleRun() {
+  const handleRun = useCallback(async () => {
     if (!code.trim()) {
-      setOutput("No hay código para compilar.");
+      setRun({
+        status: "vacio",
+        statusLabel: "No hay código para compilar",
+        console: "No hay código para compilar.",
+        exitCode: null,
+        timeMs: null,
+        compiler: "",
+      });
       return;
     }
     setRunning(true);
     setMessage(null);
-    setOutput("Compilando…");
     try {
       const response = await fetch("/api/run", {
         method: "POST",
@@ -57,17 +73,25 @@ export default function StudentPage() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error ?? "No se pudo compilar.");
-      setOutput(data.console || "El programa terminó sin salida.");
+      setRun(data as RunState);
     } catch (error) {
-      setOutput(
-        error instanceof Error
-          ? `No se pudo ejecutar el compilador: ${error.message}`
-          : "No se pudo ejecutar el compilador.",
-      );
+      setRun({
+        status: "servicio",
+        statusLabel: "No se pudo ejecutar el compilador",
+        console:
+          error instanceof Error
+            ? `No se pudo ejecutar el compilador: ${error.message}`
+            : "No se pudo ejecutar el compilador.",
+        exitCode: null,
+        timeMs: null,
+        compiler: "",
+      });
     } finally {
       setRunning(false);
     }
-  }
+  }, [code, stdin]);
+
+  runRef.current = handleRun;
 
   async function handleSubmit() {
     if (!code.trim()) {
@@ -84,12 +108,13 @@ export default function StudentPage() {
           title: title.trim(),
           code,
           stdin,
-          compilerOutput: output === CONSOLE_PLACEHOLDER ? "" : output,
+          compilerOutput: run?.console ?? "",
         }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error ?? "No se pudo guardar la entrega.");
-      setMessage({ kind: "success", text: "Entrega guardada." });
+      setMessage({ kind: "success", text: "Entrega enviada." });
+      setOpenId(data.submission?.id ?? null);
       await loadSubmissions();
     } catch (error) {
       setMessage({
@@ -101,7 +126,23 @@ export default function StudentPage() {
     }
   }
 
+  function reuse(submission: Submission) {
+    setCode(submission.code);
+    setStdin(submission.stdin);
+    setTitle(submission.title === "Ejercicio sin título" ? "" : submission.title);
+    setMessage({ kind: "success", text: "Código cargado en el editor." });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
   const busy = running || submitting;
+  const statusTone =
+    run?.status === "ok"
+      ? "ok"
+      : run?.status === "error_compilacion" || run?.status === "error_ejecucion"
+        ? "bad"
+        : run
+          ? "warn"
+          : "";
 
   return (
     <div className="shell">
@@ -110,7 +151,7 @@ export default function StudentPage() {
           <span>
             Miguel <span className="dot">C++</span> Lab
           </span>
-          <small>laboratorio de código</small>
+          <small>alumno</small>
         </div>
         <nav>
           <span className="filename">main.cpp</span>
@@ -122,21 +163,22 @@ export default function StudentPage() {
         <div className="column">
           <section className="panel">
             <div className="panel-head">
-              <span>main.cpp</span>
+              <span className="tab">main.cpp</span>
+              <span className="grow" />
               <button
                 type="button"
                 className="ghost"
                 onClick={() => {
                   setCode("");
-                  setOutput(CONSOLE_PLACEHOLDER);
+                  setRun(null);
                   setMessage(null);
                 }}
                 disabled={busy}
               >
-                Limpiar
+                Limpiar editor
               </button>
             </div>
-            <CodeEditor value={code} onChange={setCode} />
+            <CodeEditor value={code} onChange={setCode} onRun={() => runRef.current()} />
             <div className="actions">
               <button type="button" className="primary" onClick={handleRun} disabled={busy}>
                 {running ? "Compilando…" : "Compilar y ejecutar"}
@@ -151,9 +193,20 @@ export default function StudentPage() {
           <section className="panel">
             <div className="panel-head">
               <span>Consola</span>
+              <span className="grow" />
+              {run && (
+                <>
+                  <span className={`dot-status ${statusTone}`}>{run.statusLabel}</span>
+                  {run.timeMs != null && <span className="muted-chip">{run.timeMs} ms</span>}
+                  {run.compiler && <span className="muted-chip">{run.compiler}</span>}
+                  <button type="button" className="ghost" onClick={() => setRun(null)}>
+                    Limpiar
+                  </button>
+                </>
+              )}
             </div>
-            <pre className={`console${output === CONSOLE_PLACEHOLDER ? " muted" : ""}`}>
-              {output}
+            <pre className={`console${run ? "" : " muted"}`}>
+              {run ? run.console : "La consola aparecerá aquí."}
             </pre>
           </section>
         </div>
@@ -192,6 +245,8 @@ export default function StudentPage() {
           <section className="panel">
             <div className="panel-head">
               <span>Mis entregas</span>
+              <span className="grow" />
+              <span className="muted-chip">{submissions.length}</span>
               <button type="button" className="ghost" onClick={() => void loadSubmissions()}>
                 Actualizar
               </button>
@@ -204,21 +259,36 @@ export default function StudentPage() {
               <div className="submissions">
                 {submissions.map((submission) => (
                   <article key={submission.id} className="submission">
-                    <div
+                    <button
+                      type="button"
                       className="submission-head"
                       onClick={() => setOpenId(openId === submission.id ? null : submission.id)}
                     >
-                      <div style={{ minWidth: 0 }}>
-                        <div className="submission-title">{submission.title}</div>
-                        <div className="submission-date">{formatDate(submission.createdAt)}</div>
-                      </div>
+                      <span className="submission-main">
+                        <span className="submission-title">{submission.title}</span>
+                        <span className="submission-date">{formatDate(submission.createdAt)}</span>
+                      </span>
                       <span className={`badge ${submission.reviewStatus}`}>
                         {STATUS_LABELS[submission.reviewStatus]}
                       </span>
-                    </div>
+                    </button>
+
+                    {submission.feedback && openId !== submission.id && (
+                      <div className="submission-body">
+                        <div className="feedback">{submission.feedback}</div>
+                      </div>
+                    )}
 
                     {openId === submission.id && (
                       <div className="submission-body">
+                        {submission.feedback && (
+                          <div>
+                            <div className="block-label">
+                              Revisión del profesor · {formatDate(submission.reviewedAt)}
+                            </div>
+                            <div className="feedback">{submission.feedback}</div>
+                          </div>
+                        )}
                         <div>
                           <div className="block-label">Código</div>
                           <pre className="code-block">{submission.code}</pre>
@@ -231,24 +301,15 @@ export default function StudentPage() {
                         )}
                         {submission.compilerOutput && (
                           <div>
-                            <div className="block-label">Última salida del compilador</div>
+                            <div className="block-label">Salida guardada</div>
                             <pre className="code-block">{submission.compilerOutput}</pre>
                           </div>
                         )}
-                        {submission.feedback && (
-                          <div>
-                            <div className="block-label">
-                              Revisión · {formatDate(submission.reviewedAt)}
-                            </div>
-                            <div className="feedback">{submission.feedback}</div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {openId !== submission.id && submission.feedback && (
-                      <div className="submission-body">
-                        <div className="feedback">{submission.feedback}</div>
+                        <div>
+                          <button type="button" onClick={() => reuse(submission)}>
+                            Abrir en el editor
+                          </button>
+                        </div>
                       </div>
                     )}
                   </article>

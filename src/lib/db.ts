@@ -82,12 +82,14 @@ export async function reviewSubmission(args: {
   id: string;
   status: ReviewStatus;
   feedback: string;
+  title?: string | null;
   key: string;
 }): Promise<Submission | null> {
   const { data, error } = await db().rpc("cpp_lab_review_submission", {
     p_id: args.id,
     p_status: args.status,
     p_feedback: args.feedback,
+    p_title: args.title ?? null,
     p_key: args.key,
   });
 
@@ -100,6 +102,20 @@ export async function reviewSubmission(args: {
 export async function checkProfessorKey(key: string): Promise<boolean> {
   const { data, error } = await db().rpc("cpp_lab_check_professor_key", { p_key: key });
   if (error) throw new Error(`No se pudo verificar la clave: ${error.message}`);
+  return data === true;
+}
+
+/** Estado del alta: si ya hay clave y si la ventana de alta sigue abierta. */
+export async function professorStatus(): Promise<{ bound: boolean; setupOpen: boolean }> {
+  const { data, error } = await db().rpc("cpp_lab_professor_status");
+  if (error) throw new Error(`No se pudo leer el estado del acceso: ${error.message}`);
+  return data as { bound: boolean; setupOpen: boolean };
+}
+
+/** Da de alta la clave del profesor (sólo con la ventana de alta abierta). */
+export async function setProfessorKey(key: string): Promise<boolean> {
+  const { data, error } = await db().rpc("cpp_lab_set_professor_key", { p_key: key });
+  if (error) throw new Error(error.message);
   return data === true;
 }
 

@@ -1,33 +1,34 @@
 # Miguel C++ Lab
 
-Laboratorio mínimo para practicar C++ y revisar entregas.
+Laboratorio para practicar C++ y revisar entregas. Dos vistas, nada más:
 
-- **`/`** — el alumno escribe C++, lo compila y lo ejecuta de verdad, y entrega.
-- **`/profesor`** — el profesor ve cada entrega, la marca y deja feedback.
-- **`/api/...`** — la misma información, en JSON, para consultarla desde herramientas externas.
+- **`/`** — el alumno escribe C++ en un editor con resaltado, autocompletado del
+  lenguaje y de las cabeceras estándar, lo compila y lo ejecuta de verdad, y entrega.
+- **`/profesor`** — el profesor entra con su contraseña, ve el código completo, la
+  entrada, el resultado real de compilación y ejecución, nombra el ejercicio, marca el
+  estado y deja sus notas.
+- **`/api/...`** — lo mismo en JSON, para consultarlo desde herramientas externas.
 
-No hay cursos, teoría, pistas, ejercicios predefinidos ni IA que complete código:
-el ejercicio lo plantea el profesor fuera de la aplicación.
+Sin cursos, sin teoría, sin ejercicios predefinidos, sin pistas y sin IA que complete
+el código: el ejercicio lo plantea el profesor fuera de la aplicación y la consola
+muestra exactamente lo que respondió el compilador, sin interpretarlo.
 
 ## Stack
 
-| Pieza          | Elección                                                              |
-| -------------- | --------------------------------------------------------------------- |
-| Framework      | Next.js 15 (App Router) + TypeScript                                  |
-| Editor         | CodeMirror 6 (`@uiw/react-codemirror`) con resaltado de C++           |
-| Base de datos  | Supabase PostgreSQL — tablas `cpp_lab_*` del proyecto `Mis proyectos` |
-| Compilador     | Compiler Explorer (godbolt.org), GCC 13.2 con `-std=c++17`           |
-| Hosting        | Vercel, desplegando desde la rama `main` de este repositorio          |
+| Pieza         | Elección                                                              |
+| ------------- | --------------------------------------------------------------------- |
+| Framework     | Next.js 15 (App Router) + TypeScript                                  |
+| Editor        | CodeMirror 6 (`@uiw/react-codemirror`) con `@codemirror/lang-cpp`      |
+| Base de datos | Supabase PostgreSQL — tablas `cpp_lab_*`                              |
+| Compilador    | Compiler Explorer (godbolt.org), GCC 13.2 con `-std=c++17`            |
+| Hosting       | Vercel, rama de producción `main`                                     |
 
 ## Desarrollo
 
 ```bash
 npm install
-cp .env.example .env.local   # y rellena los valores
-npm run dev                  # http://localhost:3000
+npm run dev        # http://localhost:3000
 ```
-
-Otros comandos:
 
 ```bash
 npm run build      # build de producción
@@ -36,54 +37,62 @@ npm run lint       # eslint
 npm run typecheck  # tsc --noEmit
 ```
 
-## Variables de entorno
+En el repositorio no hay ninguna clave. La aplicación necesita dos variables, que en
+Vercel se definen en *Project → Settings → Environment Variables* y en local en
+`.env.local` (ver `.env.example`):
 
-Se configuran en Vercel (Project → Settings → Environment Variables) y, en local,
-en `.env.local`. Ninguna se escribe en el código ni se sube al repositorio.
+| Variable                   | Qué es                                                        |
+| -------------------------- | ------------------------------------------------------------- |
+| `SUPABASE_URL`             | URL del proyecto de Supabase.                                  |
+| `SUPABASE_PUBLISHABLE_KEY` | *Publishable key* del proyecto (rol `anon`, permisos acotados). |
 
-| Variable                   | Obligatoria | Para qué sirve                                                          |
-| -------------------------- | ----------- | ----------------------------------------------------------------------- |
-| `SUPABASE_URL`             | sí          | URL del proyecto Supabase.                                              |
-| `SUPABASE_PUBLISHABLE_KEY` | sí          | Clave publishable (pública por diseño; los permisos los da la base).     |
-| `PROFESSOR_KEY`            | sí          | Clave de revisión: protege `/profesor` y la API de revisión. Mín. 12 car. |
-| `CPP_COMPILER_ID`          | no          | Compilador de Compiler Explorer (por defecto `g132`).                   |
-| `CPP_COMPILER_ARGS`        | no          | Flags de compilación (por defecto `-std=c++17 -O1 -Wall`).              |
-| `CPP_COMPILER_LABEL`       | no          | Texto que se muestra junto al resultado.                                |
+`GET /api/health` dice si cada una **existe**, nunca su valor.
 
-`GET /api/health` dice si cada variable **existe**, nunca su valor.
+## La contraseña del profesor
+
+No hay contraseñas en el código ni en el repositorio, y tampoco hace falta crear
+variables de entorno en Vercel:
+
+1. La primera vez, `/profesor` pide **definir** la contraseña.
+2. Se guarda como hash bcrypt en `cpp_lab_secrets`, tabla sin permisos para ningún rol
+   de la API.
+3. El alta sólo funciona mientras haya una **ventana de alta** abierta, para que nadie
+   pueda adelantarse. Se abre desde el SQL Editor de Supabase:
+
+   ```sql
+   select cpp_lab_open_setup_window(30);  -- 30 minutos
+   ```
+
+4. A partir de ahí, `/profesor` pide la contraseña y la guarda sólo en el
+   `sessionStorage` de esa pestaña; cada petición la manda como
+   `Authorization: Bearer …`.
+
+Para cambiarla más tarde, con la contraseña actual:
+
+```bash
+curl -X POST https://miguel-cpp-lab.vercel.app/api/professor/rotate \
+  -H "Authorization: Bearer <CONTRASEÑA ACTUAL>" \
+  -H "Content-Type: application/json" \
+  -d '{"newKey":"<CONTRASEÑA NUEVA>"}'
+```
 
 ## Seguridad
 
-- Todo el acceso a datos ocurre en el servidor (route handlers). La clave de Supabase
-  no llega al navegador.
-- En la base de datos, el rol anónimo sólo tiene `SELECT` e `INSERT` sobre
-  `cpp_lab_submissions`: **una entrega enviada no se puede modificar ni borrar**
-  desde la API pública.
-- La revisión pasa por la función `cpp_lab_review_submission(...)`, `SECURITY DEFINER`,
-  que exige la clave del profesor. El hash (bcrypt) vive en `cpp_lab_secrets`, tabla
-  sin permisos para ningún rol de la API.
-- `/profesor` pide la clave, la guarda sólo en `sessionStorage` de esa pestaña y la
-  manda como `Authorization: Bearer` en cada petición.
-
-### Rotar `PROFESSOR_KEY`
-
-La base guarda el hash de la clave con la que se revisó por primera vez. Para cambiarla:
-
-1. Cambia `PROFESSOR_KEY` en Vercel y vuelve a desplegar.
-2. Llama una vez, con la clave **anterior**:
-
-   ```bash
-   curl -X POST https://miguel-cpp-lab.vercel.app/api/professor/rotate \
-     -H "Authorization: Bearer <CLAVE_ANTERIOR>"
-   ```
-
-A partir de ahí sólo vale la nueva. (La primera clave que se use queda registrada
-automáticamente, así que en una instalación nueva no hay que hacer nada.)
+- Todo el acceso a datos ocurre en el servidor (route handlers). El navegador nunca
+  ve claves de Supabase.
+- El rol anónimo sólo tiene `SELECT` e `INSERT` sobre `cpp_lab_submissions`: **una
+  entrega enviada no se puede modificar ni borrar** desde la API pública, ni siquiera
+  por el alumno.
+- Una entrega nace siempre como `pendiente` (lo fuerza la policy de `INSERT`).
+- La revisión pasa por `cpp_lab_review_submission(...)`, `SECURITY DEFINER`, que exige
+  la contraseña del profesor y la verifica contra el hash.
+- `cpp_lab_secrets` y `cpp_lab_setup_window` no tienen permisos para `anon` ni
+  `authenticated`.
 
 ## API
 
-Lectura pública; escritura de revisiones con `Authorization: Bearer <PROFESSOR_KEY>`.
-Las entregas van siempre ordenadas de la más reciente a la más antigua.
+Lectura pública; escritura de revisiones con `Authorization: Bearer <contraseña>`.
+Siempre ordenado de la entrega más reciente a la más antigua.
 
 ### `GET /api/submissions`
 
@@ -110,9 +119,8 @@ Admite `?limit=` (1–500, por defecto 100).
 
 ### `GET /api/submissions/latest`
 
-Devuelve **directamente** el objeto de la última entrega (mismo formato que arriba),
-o `404` con `{"error": "...", "submission": null}` si todavía no hay ninguna.
-Es el endpoint pensado para cuando el alumno dice «ya lo entregué».
+Devuelve **directamente** el objeto de la última entrega, o `404` si no hay ninguna.
+Es el endpoint para cuando el alumno dice «ya lo entregué».
 
 ### `GET /api/submissions/:id`
 
@@ -126,20 +134,19 @@ Una entrega concreta.
 
 Valida que el código no esté vacío y los tamaños máximos (código 100 000, stdin 20 000,
 título 200, salida 100 000 caracteres). Responde `201` con `{ "submission": { … } }`.
-Una entrega nace siempre como `pendiente`.
 
 ### `POST /api/submissions/:id/review`
 
 ```bash
 curl -X POST https://miguel-cpp-lab.vercel.app/api/submissions/<id>/review \
-  -H "Authorization: Bearer $PROFESSOR_KEY" \
+  -H "Authorization: Bearer <CONTRASEÑA>" \
   -H "Content-Type: application/json" \
-  -d '{"status":"correcto","feedback":"Bien resuelto."}'
+  -d '{"status":"correcto","feedback":"Bien resuelto.","title":"Condicionales"}'
 ```
 
-`status`: `pendiente` | `correcto` | `necesita_correccion` (también acepta
-`"necesita corrección"` y variantes con guion). Responde `{ "submission": { … } }`
-con `reviewedAt` actualizado.
+`status`: `pendiente` | `correcto` | `necesita_correccion` (acepta también
+`"necesita corrección"` y variantes con guion). `title` es opcional. Responde
+`{ "submission": { … } }` con `reviewedAt` actualizado.
 
 ### `POST /api/run`
 
@@ -147,17 +154,22 @@ con `reviewedAt` actualizado.
 { "code": "#include <iostream>…", "stdin": "18" }
 ```
 
-Compila y ejecuta de verdad; devuelve `status`, `compileOutput`, `stdout`, `stderr`,
-`exitCode`, `timedOut`, `timeMs` y `console` (el texto ya formateado). No interpreta
-ni explica los errores: muestra lo que respondió g++.
+Compila y ejecuta de verdad. Devuelve `status`, `statusLabel`, `compileOutput`,
+`stdout`, `stderr`, `exitCode`, `timedOut`, `timeMs` y `console` (texto ya formateado).
 
-### `GET /api/health`
+### Otros
 
-Estado de la configuración, sin revelar valores.
+| Endpoint                     | Para qué                                                   |
+| ---------------------------- | ---------------------------------------------------------- |
+| `GET /api/health`            | Estado de la configuración, sin revelar valores.            |
+| `GET /api/professor/status`  | `{ bound, setupOpen }`: si hay contraseña y si el alta está abierta. |
+| `POST /api/professor/setup`  | Da de alta la contraseña (sólo con la ventana abierta).     |
+| `POST /api/professor/session`| Valida la contraseña.                                       |
+| `POST /api/professor/rotate` | Cambia la contraseña.                                       |
 
 ## Base de datos
 
-`supabase/migrations/20260912_000001_cpp_lab.sql` contiene el esquema completo.
+`supabase/migrations/` contiene el esquema completo y sus permisos.
 
 ```
 cpp_lab_submissions
@@ -170,6 +182,9 @@ cpp_lab_submissions
   review_status   text          -- pendiente | correcto | necesita_correccion
   feedback        text
   reviewed_at     timestamptz
+
+cpp_lab_secrets       -- hash bcrypt de la contraseña del profesor
+cpp_lab_setup_window  -- ventana temporal de alta
 ```
 
 Nada se borra automáticamente.
@@ -179,5 +194,14 @@ Nada se borra automáticamente.
 La versión anterior vivía en `miguel-c-lab-4sm2k2.v2.appdeploy.ai`. Sus entregas se
 exportaron por su propia API (`/api/submissions`) y se insertaron aquí conservando
 `id`, código, stdin, salida del compilador, estado y fecha original. Había **una**
-entrega y está migrada. La antigua página puente de Vercel que redirigía a AppDeploy
-se eliminó: producción sirve esta aplicación.
+entrega y está migrada. La página puente que redirigía a AppDeploy ya no existe:
+producción sirve esta aplicación.
+
+## Atajos del editor
+
+| Atajo                 | Acción                        |
+| --------------------- | ----------------------------- |
+| `Ctrl/⌘ + Enter`      | Compilar y ejecutar           |
+| `Ctrl/⌘ + Espacio`    | Sugerencias                   |
+| `Tab`                 | Indentar                      |
+| `Ctrl/⌘ + F`          | Buscar en el código           |

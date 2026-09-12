@@ -1,13 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
-import { professorKey } from "./env";
-
-/** Comparación en tiempo constante entre la clave recibida y la del entorno. */
-function sameKey(received: string, expected: string): boolean {
-  const a = Buffer.from(received, "utf8");
-  const b = Buffer.from(expected, "utf8");
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
-}
+import { checkProfessorKey } from "./db";
 
 export function extractKey(request: Request): string | null {
   const header = request.headers.get("authorization");
@@ -16,29 +7,21 @@ export function extractKey(request: Request): string | null {
   return direct ? direct.trim() : null;
 }
 
-export type AuthResult =
-  | { ok: true; key: string }
-  | { ok: false; status: 401 | 503; message: string };
+export type AuthResult = { ok: true; key: string } | { ok: false; status: 401; message: string };
 
 /**
- * Autoriza una petición de profesor. La clave vive en PROFESSOR_KEY (entorno de
- * Vercel): nunca en el código ni en el repositorio.
+ * Autoriza una petición de profesor. La clave no vive en el código ni en el
+ * repositorio: la base guarda su hash y la verifica en una función
+ * SECURITY DEFINER.
  */
-export function authorizeProfessor(request: Request): AuthResult {
-  let expected: string;
-  try {
-    expected = professorKey();
-  } catch {
-    return {
-      ok: false,
-      status: 503,
-      message: "PROFESSOR_KEY no está configurada en el servidor.",
-    };
-  }
-
+export async function authorizeProfessor(request: Request): Promise<AuthResult> {
   const received = extractKey(request);
-  if (!received || !sameKey(received, expected)) {
+  if (!received) {
+    return { ok: false, status: 401, message: "Falta la clave del profesor." };
+  }
+  const valid = await checkProfessorKey(received);
+  if (!valid) {
     return { ok: false, status: 401, message: "Clave de profesor inválida." };
   }
-  return { ok: true, key: expected };
+  return { ok: true, key: received };
 }
