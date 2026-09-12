@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { ConfigError } from "./env";
 
 export function json(body: unknown, status = 200) {
   return NextResponse.json(body, {
@@ -13,6 +14,8 @@ export function fail(message: string, status = 400, extra?: Record<string, unkno
 
 export function serverError(error: unknown) {
   const message = error instanceof Error ? error.message : "Error inesperado.";
+  // Falta configuración: no es un fallo del código, es un despliegue a medio hacer.
+  if (error instanceof ConfigError) return json({ error: message, code: "config" }, 503);
   return json({ error: message }, 500);
 }
 
