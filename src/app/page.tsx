@@ -43,7 +43,6 @@ export default function StudentPage() {
   const [phase, setPhase] = useState<SessionPhase>("idle");
   const [result, setResult] = useState<RunPayload | null>(null);
   const [diagnostics, setDiagnostics] = useState<CompilerNote[]>([]);
-  const [transcript, setTranscript] = useState("");
   const [runCode, setRunCode] = useState<string | null>(null);
 
   // ---- entregas
@@ -144,12 +143,15 @@ export default function StudentPage() {
   const applyResult = useCallback((payload: RunPayload) => {
     setResult(payload);
     setDiagnostics(payload.diagnostics ?? []);
-    setTranscript(payload.console ?? "");
   }, []);
+
+  /** Lo que se guarda con la entrega es la sesión tal y como la vio el alumno. */
+  const transcript = useMemo(() => segments.map((segment) => segment.text).join(""), [segments]);
 
   const start = useCallback(
     async (mode: "interactive" | "batch" = "interactive", stdin = "") => {
       if (!code.trim()) {
+        abortRef.current?.abort();
         setSegments([{ kind: "warn", text: "No hay código para compilar.\n" }]);
         setPhase("done");
         setTab("terminal");
@@ -186,7 +188,9 @@ export default function StudentPage() {
         if (payload.stdout) next.push({ kind: "out", text: payload.stdout });
         sessionRef.current.shown = payload.stdout;
 
-        if (payload.waitingForInput && mode === "interactive") {
+        if (payload.notice) next.push({ kind: "warn", text: `\n[${payload.notice}]\n` });
+
+        if (payload.status === "entrada") {
           setSegments(next);
           setPhase("waiting");
           return;
@@ -222,6 +226,16 @@ export default function StudentPage() {
       try {
         const payload = await callRun(session.code, stdinFrom(lines), "interactive");
         applyResult(payload);
+
+        if (payload.status === "servicio" || payload.status === "timeout") {
+          setSegments((current) => [
+            ...current,
+            { kind: "err", text: `\n${payload.stderr || payload.statusLabel}\n` },
+            statusSegment(payload.statusLabel, payload.timeMs),
+          ]);
+          setPhase("done");
+          return;
+        }
 
         const { delta, diverged } = nextChunk(session.shown, payload.stdout);
         session.shown = payload.stdout;
@@ -285,6 +299,7 @@ export default function StudentPage() {
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();
+    abortRef.current = null;
     setSegments((current) => [...current, { kind: "info", text: "^C\n" }]);
     setPhase("done");
   }, []);
@@ -329,11 +344,30 @@ export default function StudentPage() {
       );
       if (!ok) return;
     }
+    abortRef.current?.abort();
     setCode(submission.code);
     setBatchStdin(submission.stdin);
     setTitle(submission.title === "Ejercicio sin título" ? "" : submission.title);
+    setDiagnostics([]);
+    setResult(null);
+    setSegments([]);
+    setPhase("idle");
+    setRunCode(null);
     setMessage({ kind: "success", text: "Código cargado en el editor." });
   }
+
+  const handleCursor = useCallback((line: number, column: number, selected: number) => {
+    // Sin objeto nuevo si nada cambió: evita un render por pulsación.
+    setCursor((current) =>
+      current.line === line && current.column === column && current.selected === selected
+        ? current
+        : { line, column, selected },
+    );
+  }, []);
+
+  const handleViewReady = useCallback((view: EditorView) => {
+    viewRef.current = view;
+  }, []);
 
   // ------------------------------------------------------------- diagnóstico
   const goToLine = useCallback((line: number, column: number | null) => {
@@ -406,7 +440,7 @@ export default function StudentPage() {
         void start();
       } else if (mod && event.shiftKey && event.key === "Enter") {
         event.preventDefault();
-        void submit();
+        if (!submitting) void submit();
       } else if (event.ctrlKey && event.key === "`") {
         event.preventDefault();
         togglePanel();
@@ -614,8 +648,8 @@ export default function StudentPage() {
               onChange={setCode}
               onRun={() => void start()}
               onSubmit={() => void submit()}
-              onCursor={(line, column, selected) => setCursor({ line, column, selected })}
-              onViewReady={(view) => (viewRef.current = view)}
+              onCursor={handleCursor}
+              onViewReady={handleViewReady}
               diagnostics={diagnostics}
               wrap={wrap}
             />
@@ -668,7 +702,19 @@ export default function StudentPage() {
               </button>
               <span className="grow" />
               {result && <span className="muted-chip">{result.compiler}</span>}
-              <button type="button" className="ghost" onClick={() => setSegments([])}>
+              {phase === "running" && (
+                <button type="button" className="ghost" onClick={cancel}>
+                  Detener
+                </button>
+              )}
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  setSegments([]);
+                  setPhase("idle");
+                }}
+              >
                 Limpiar
               </button>
             </div>
@@ -747,6 +793,15 @@ export default function StudentPage() {
           </section>
         </main>
       </div>
+
+      <p aria-live="polite" className="sr-only">
+        {phase === "running"
+          ? "Compilando y ejecutando"
+          : phase === "waiting"
+            ? "El programa está esperando entrada"
+            : (result?.statusLabel ?? "")}
+        {message ? ` · ${message.text}` : ""}
+      </p>
 
       <footer className="statusbar">
         <span className={`run-dot ${result?.status ?? "idle"}`}>

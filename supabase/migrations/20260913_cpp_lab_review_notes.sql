@@ -113,3 +113,17 @@ begin
     raise exception 'anon no debe poder actualizar entregas';
   end if;
 end $$;
+
+-- ---------------------------------------------------------------------------
+-- Correcciones posteriores (aplicadas como cpp_lab_review_partial_updates y
+-- cpp_lab_insert_columns_and_bcrypt_cost):
+--
+--   * feedback null = "no tocar" (omitirlo en una revisión ya no lo borraba).
+--   * El rol anónimo sólo puede rellenar title, code, stdin y compiler_output:
+--     no puede forjar id, created_at ni el estado de revisión.
+--   * bcrypt con coste 11 y contraseña mínima de 10 caracteres.
+-- ---------------------------------------------------------------------------
+
+revoke insert on table public.cpp_lab_submissions from anon, authenticated;
+grant insert (title, code, stdin, compiler_output)
+  on table public.cpp_lab_submissions to anon, authenticated;

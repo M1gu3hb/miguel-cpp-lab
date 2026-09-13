@@ -89,7 +89,7 @@ export async function createSubmission(input: {
 export async function reviewSubmission(args: {
   id: string;
   status: ReviewStatus;
-  feedback: string;
+  feedback: string | null;
   title?: string | null;
   notes?: ReviewNote[] | null;
   key: string;

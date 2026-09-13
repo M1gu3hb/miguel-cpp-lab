@@ -1,22 +1,32 @@
 /**
  * Ejecución real de C++ contra Compiler Explorer (godbolt.org).
  *
- * Dos cosas que hacen que la consola se comporte como una terminal de verdad:
+ * Tres cosas sostienen que la terminal se comporte como una de verdad:
  *
- *  1. Se antepone un prólogo que pone `std::cout` en modo sin búfer. Sin eso, si
- *     el programa muere por una señal se pierde todo lo que había impreso, que es
- *     justo lo contrario de lo que pasa en una terminal.
- *  2. Ese mismo prólogo envuelve el buffer de `std::cin`: cuando el programa pide
- *     un carácter y ya no queda entrada, emite una marca. Esa marca es el punto
- *     EXACTO en el que un programa de verdad se quedaría esperando a que teclees.
- *     Todo lo que el proceso imprime después de esa marca es consecuencia de que
- *     la entrada se cerró, así que en modo interactivo se oculta hasta que el
- *     alumno escriba la siguiente línea.
+ *  1. Se antepone un prólogo que pone `std::cout` en modo sin búfer. Sin eso, un
+ *     programa que muere por una señal pierde todo lo que había impreso, justo al
+ *     revés que en una terminal.
+ *  2. Ese prólogo envuelve el buffer de `std::cin`: cuando el programa pide un
+ *     carácter y ya no queda entrada, imprime una marca. Esa marca es el punto
+ *     EXACTO en el que un programa real se quedaría esperando a que teclees. La
+ *     marca lleva un token aleatorio por petición, así que el código del alumno
+ *     no puede falsificarla.
+ *  3. El prólogo termina en `#line 1 "main.cpp"`, de modo que los errores del
+ *     compilador siguen citando las líneas del alumno.
  *
- * `#line 1 "main.cpp"` cierra el prólogo para que los números de línea y los
- * nombres de fichero de los errores sigan siendo los del alumno.
+ * Como el prólogo incluye <iostream>, un programa al que le falte ese include
+ * compilaría aquí y no con g++ a secas. Para no mentir, cuando se pide
+ * verificación se compila EN PARALELO el código tal cual lo escribió el alumno y
+ * mandan sus diagnósticos.
  */
-import { countBySeverity, parseDiagnostics, stripAnsi, type CompilerNote } from "./gcc-diagnostics";
+import { randomBytes } from "node:crypto";
+import {
+  countBySeverity,
+  parseDiagnostics,
+  remapCompilerOutput,
+  stripAnsi,
+  type CompilerNote,
+} from "./gcc-diagnostics";
 
 const COMPILER = process.env.CPP_COMPILER_ID ?? "g132"; // GCC 13.2
 const COMPILER_LABEL = process.env.CPP_COMPILER_LABEL ?? "g++ 13.2";
@@ -26,31 +36,53 @@ const USER_AGENT = "miguel-cpp-lab (https://miguel-cpp-lab.vercel.app)";
 const REQUEST_TIMEOUT_MS = 28_000;
 const MAX_OUTPUT = 60_000;
 
-/** Marca que el prólogo imprime cuando el programa pide entrada y no la hay. */
-const WAIT_MARK = "LAB_STDIN_WAIT";
+/**
+ * Programas que leen sin pasar por `std::cin`: la marca nunca se emite, así que
+ * la sesión interactiva no es posible y se dice en vez de fingirla.
+ * `sync_with_stdio` no está en la lista: el prólogo lo sobrevive (ver abajo).
+ */
+const BYPASSES_CIN = /\b(scanf|getchar|getc|fgets|gets|fread|freopen)\s*\(|\bcin\s*\.\s*rdbuf\s*\(/;
 
-const PROLOGUE =
-  '#include <iostream>\n' +
-  '#include <streambuf>\n' +
-  'namespace lab_rt {\n' +
-  'struct MarkBuf : std::streambuf {\n' +
-  '  std::streambuf* inner; char ch = 0; bool marked = false;\n' +
-  '  explicit MarkBuf(std::streambuf* b) : inner(b) {}\n' +
-  '  int_type underflow() override {\n' +
-  '    if (gptr() && gptr() < egptr()) return traits_type::to_int_type(*gptr());\n' +
-  '    int_type c = inner->sbumpc();\n' +
-  '    if (traits_type::eq_int_type(c, traits_type::eof())) {\n' +
-  `      if (!marked) { marked = true; std::cout << "${WAIT_MARK}" << std::flush; }\n` +
-  '      return traits_type::eof();\n' +
-  '    }\n' +
-  '    ch = traits_type::to_char_type(c);\n' +
-  '    setg(&ch, &ch, &ch + 1);\n' +
-  '    return traits_type::to_int_type(ch);\n' +
-  '  }\n' +
-  '};\n' +
-  'struct Init { Init() { std::cout << std::unitbuf; static MarkBuf b(std::cin.rdbuf()); std::cin.rdbuf(&b); } } init;\n' +
-  '}\n' +
-  '#line 1 "main.cpp"\n';
+function markToken(): string {
+  return `LAB${randomBytes(8).toString("hex").toUpperCase()}WAIT`;
+}
+
+function prologue(mark: string): string {
+  return (
+    '#include <iostream>\n' +
+    '#include <streambuf>\n' +
+    'namespace lab_rt {\n' +
+    'struct MarkBuf : std::streambuf {\n' +
+    '  std::streambuf* inner; char ch = 0; bool marked = false;\n' +
+    '  explicit MarkBuf(std::streambuf* b) : inner(b) {}\n' +
+    '  int_type underflow() override {\n' +
+    '    if (gptr() && gptr() < egptr()) return traits_type::to_int_type(*gptr());\n' +
+    '    int_type c = inner->sbumpc();\n' +
+    '    if (traits_type::eq_int_type(c, traits_type::eof())) {\n' +
+    `      if (!marked) { marked = true; std::cout << "${mark}" << std::flush; }\n` +
+    '      return traits_type::eof();\n' +
+    '    }\n' +
+    '    ch = traits_type::to_char_type(c);\n' +
+    '    setg(&ch, &ch, &ch + 1);\n' +
+    '    return traits_type::to_int_type(ch);\n' +
+    '  }\n' +
+    '};\n' +
+    // `ios::sync_with_stdio(false)` reinstala el buffer de cin y se llevaría por
+    // delante el nuestro. La macro vuelve a engancharlo justo después; va al
+    // final del prólogo para no romper la declaración del propio header.
+    'inline MarkBuf*& slot() { static MarkBuf* p = nullptr; return p; }\n' +
+    'inline void attach() {\n' +
+    '  if (slot() && std::cin.rdbuf() == slot()) return;\n' +
+    '  MarkBuf* nb = new MarkBuf(std::cin.rdbuf());\n' +
+    '  if (slot()) nb->marked = slot()->marked;\n' +
+    '  slot() = nb; std::cin.rdbuf(nb);\n' +
+    '}\n' +
+    'inline void reattach() { attach(); }\n' +
+    'struct Init { Init() { std::cout << std::unitbuf; attach(); } } init;\n' +
+    '}\n' +
+    '#define sync_with_stdio(...) sync_with_stdio(__VA_ARGS__), ::lab_rt::reattach()\n'
+  );
+}
 
 export type RunStatus =
   | "ok"
@@ -75,6 +107,10 @@ export type RunResult = {
   /** Todo lo que escribió el proceso, ya sin la marca. */
   stdoutFull: string;
   waitingForInput: boolean;
+  /** false cuando el programa no lee por std::cin y la sesión no puede ser interactiva. */
+  interactive: boolean;
+  /** Motivo, cuando interactive es false y el alumno debería saberlo. */
+  notice: string | null;
   stderr: string;
   exitCode: number | null;
   signal: string | null;
@@ -126,20 +162,18 @@ export const COMMAND_LINE = `g++ ${ARGS} main.cpp -o main`;
 export type RunOptions = {
   /** "interactive" oculta la cola posterior a la marca; "batch" muestra todo. */
   mode?: "interactive" | "batch";
+  /** Compila además el código tal cual, para que los errores sean los de verdad. */
+  verify?: boolean;
   signal?: AbortSignal;
 };
 
-export async function runCpp(code: string, stdin: string, options: RunOptions = {}): Promise<RunResult> {
-  const mode = options.mode ?? "batch";
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  // Si el navegador cancela, se cancela también la petición a godbolt.
-  const signal =
-    options.signal && typeof AbortSignal.any === "function"
-      ? AbortSignal.any([controller.signal, options.signal])
-      : controller.signal;
+type Fetched = { ok: true; payload: GodboltResponse } | { ok: false; result: RunResult };
 
-  let payload: GodboltResponse;
+async function post(
+  body: unknown,
+  signal: AbortSignal | undefined,
+  expectBuild = true,
+): Promise<Fetched> {
   try {
     const response = await fetch(`${ENDPOINT}/${COMPILER}/compile`, {
       method: "POST",
@@ -149,129 +183,218 @@ export async function runCpp(code: string, stdin: string, options: RunOptions = 
         "User-Agent": USER_AGENT,
       },
       signal,
-      body: JSON.stringify({
-        source: PROLOGUE + code,
-        lang: "c++",
-        options: {
-          userArguments: ARGS,
-          executeParameters: { args: [], stdin },
-          compilerOptions: { executorRequest: true, skipAsm: true },
-          filters: { execute: true },
-        },
-      }),
+      body: JSON.stringify(body),
     });
-
     if (!response.ok) {
-      return service(`El servicio de compilación respondió ${response.status}.`);
+      return { ok: false, result: service(`El servicio de compilación respondió ${response.status}.`) };
     }
     const text = await response.text();
+    let payload: GodboltResponse;
     try {
       payload = JSON.parse(text) as GodboltResponse;
     } catch {
-      return service("El servicio de compilación devolvió una respuesta que no se pudo leer.");
+      return {
+        ok: false,
+        result: service("El servicio de compilación devolvió una respuesta que no se pudo leer."),
+      };
     }
-    if (!payload || typeof payload !== "object" || !("buildResult" in payload)) {
+    const shapeOk =
+      payload && typeof payload === "object" && (!expectBuild || "buildResult" in payload);
+    if (!shapeOk) {
       // Falla ruidosamente: un formato inesperado no puede parecer "todo bien".
-      return service("El servicio de compilación cambió de formato: revisa la integración.");
+      return {
+        ok: false,
+        result: service("El servicio de compilación cambió de formato: revisa la integración."),
+      };
     }
+    return { ok: true, payload };
   } catch (error) {
     const aborted = error instanceof Error && error.name === "AbortError";
     if (aborted) {
       return {
-        ...service("La compilación superó el límite de tiempo."),
-        status: "timeout",
-        statusLabel: "Tiempo de espera agotado",
-        timedOut: true,
+        ok: false,
+        result: {
+          ...service("La compilación superó el límite de tiempo."),
+          status: "timeout",
+          statusLabel: "Tiempo de espera agotado",
+          timedOut: true,
+        },
       };
     }
-    return service("No se pudo contactar con el servicio de compilación.");
-  } finally {
-    clearTimeout(timer);
+    return { ok: false, result: service("No se pudo contactar con el servicio de compilación.") };
   }
+}
 
-  const build = payload.buildResult ?? {};
-  const diagnostics = parseDiagnostics(build.stderr as never);
-  const { errors, warnings } = countBySeverity(diagnostics);
-  const compileOutput = [joinLines(build.stdout), joinLines(build.stderr)].filter(Boolean).join("\n");
+function runBody(source: string, stdin: string) {
+  return {
+    source,
+    lang: "c++",
+    options: {
+      userArguments: ARGS,
+      executeParameters: { args: [], stdin },
+      compilerOptions: { executorRequest: true, skipAsm: true },
+      filters: { execute: true },
+    },
+  };
+}
 
-  if ((build.code ?? 0) !== 0) {
-    return {
+function compileOnlyBody(source: string) {
+  return {
+    source,
+    lang: "c++",
+    options: {
+      userArguments: ARGS,
+      compilerOptions: { skipAsm: true },
+      filters: { execute: false },
+    },
+  };
+}
+
+export async function runCpp(code: string, stdin: string, options: RunOptions = {}): Promise<RunResult> {
+  const wantsInteractive = (options.mode ?? "batch") === "interactive";
+  const interactive = wantsInteractive && !BYPASSES_CIN.test(code);
+  const notice =
+    wantsInteractive && !interactive
+      ? "Este programa lee la entrada sin usar std::cin (scanf, getchar, sync_with_stdio…), " +
+        "así que la entrada se envía completa antes de ejecutar, desde la pestaña ENTRADA."
+      : null;
+
+  const mark = markToken();
+  const head = prologue(mark);
+  // Líneas que el prólogo pone por delante: lo que hay que restar para que los
+  // mensajes del compilador citen las líneas del editor del alumno.
+  const offset = head.split("\n").length - 1;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const signal =
+    options.signal && typeof AbortSignal.any === "function"
+      ? AbortSignal.any([controller.signal, options.signal])
+      : controller.signal;
+
+  try {
+    const [run, verification] = await Promise.all([
+      post(runBody(head + code, stdin), signal),
+      // El código tal cual: es el que dice la verdad sobre los #include que faltan.
+      options.verify ? post(compileOnlyBody(code), signal, false) : Promise.resolve(null),
+    ]);
+
+    if (!run.ok) return { ...run.result, interactive, notice };
+    const payload = run.payload;
+
+    const build = payload.buildResult ?? {};
+    let diagnostics = parseDiagnostics(build.stderr as never, offset);
+    let compileOutput = remapCompilerOutput(
+      [joinLines(build.stdout), joinLines(build.stderr)].filter(Boolean).join("\n"),
+      offset,
+    );
+    let buildFailed = (build.code ?? 0) !== 0;
+
+    // Sólo cuando el prólogo ha hecho compilar algo que por sí solo no compila
+    // (típicamente por el <iostream> que él incluye) mandan los errores del
+    // código tal cual: es lo que vería el alumno con g++ en su máquina.
+    if (!buildFailed && verification && verification.ok) {
+      const raw = verification.payload.buildResult ?? verification.payload;
+      const rawFailed = (raw.code ?? 0) !== 0;
+      if (rawFailed) {
+        diagnostics = parseDiagnostics((raw.stderr ?? []) as never);
+        compileOutput = remapCompilerOutput(
+          [joinLines(raw.stdout as never), joinLines(raw.stderr as never)].filter(Boolean).join("\n"),
+          0,
+        );
+        buildFailed = true;
+      }
+    }
+
+    const { errors, warnings } = countBySeverity(diagnostics);
+
+    if (buildFailed) {
+      return {
+        ...base(),
+        status: "error_compilacion",
+        statusLabel: "Error de compilación",
+        compileOutput,
+        diagnostics,
+        errors,
+        warnings,
+        exitCode: build.code ?? 1,
+        interactive,
+        notice,
+      };
+    }
+
+    const rawOut = joinLines(payload.stdout);
+    const markIndex = rawOut.indexOf(mark);
+    const truncated = Boolean(payload.truncated) || Boolean(build.truncated);
+    const waitingForInput = markIndex !== -1;
+    const stdoutFull = rawOut.split(mark).join("");
+    const stdout = waitingForInput && interactive ? rawOut.slice(0, markIndex) : stdoutFull;
+
+    const stderr = joinLines(payload.stderr);
+    const exitCode = typeof payload.code === "number" ? payload.code : null;
+    const timedOut = Boolean(payload.timedOut) || /processing time exceeded/i.test(stderr);
+    const rawTime = payload.execTime != null ? Number(payload.execTime) : null;
+    const timeMs = rawTime != null && Number.isFinite(rawTime) ? rawTime : null;
+    const signalName =
+      exitCode != null && exitCode > 128 ? (SIGNALS[exitCode - 128] ?? `señal ${exitCode - 128}`) : null;
+
+    const common = {
       ...base(),
-      status: "error_compilacion",
-      statusLabel: "Error de compilación",
       compileOutput,
       diagnostics,
       errors,
       warnings,
-      exitCode: build.code ?? null,
+      stdout,
+      stdoutFull,
+      waitingForInput,
+      interactive,
+      notice: truncated
+        ? "El programa escribió tanto que la salida se cortó: la sesión interactiva no puede continuar."
+        : notice,
+      stderr,
+      exitCode,
+      signal: signalName,
+      timedOut,
+      truncated,
+      timeMs,
     };
-  }
 
-  const rawOut = joinLines(payload.stdout);
-  const markIndex = rawOut.indexOf(WAIT_MARK);
-  const waitingForInput = markIndex !== -1;
-  const stdoutFull = rawOut.split(WAIT_MARK).join("");
-  const stdout =
-    waitingForInput && mode === "interactive" ? rawOut.slice(0, markIndex) : stdoutFull;
-
-  const stderr = joinLines(payload.stderr);
-  const exitCode = typeof payload.code === "number" ? payload.code : null;
-  const timedOut = Boolean(payload.timedOut) || /processing time exceeded/i.test(stderr);
-  const truncated = Boolean(payload.truncated) || Boolean(build.truncated);
-  const rawTime = payload.execTime != null ? Number(payload.execTime) : null;
-  const timeMs = rawTime != null && Number.isFinite(rawTime) ? rawTime : null;
-  const signalName =
-    exitCode != null && exitCode > 128 ? (SIGNALS[exitCode - 128] ?? `señal ${exitCode - 128}`) : null;
-
-  const common = {
-    ...base(),
-    compileOutput,
-    diagnostics,
-    errors,
-    warnings,
-    stdout,
-    stdoutFull,
-    waitingForInput,
-    stderr,
-    exitCode,
-    signal: signalName,
-    timedOut,
-    truncated,
-    timeMs,
-  };
-
-  if (timedOut) {
-    return {
-      ...common,
-      status: "timeout",
-      statusLabel: "El programa no terminó a tiempo (posible bucle infinito)",
-    };
+    if (timedOut) {
+      return {
+        ...common,
+        status: "timeout",
+        statusLabel: "El programa no terminó a tiempo (posible bucle infinito)",
+      };
+    }
+    // Con la salida cortada la marca puede haberse perdido: no se puede seguir
+    // la sesión sin arriesgarse a mentir.
+    if (waitingForInput && interactive && !truncated) {
+      return { ...common, status: "entrada", statusLabel: "El programa está leyendo de la entrada" };
+    }
+    if (signalName) {
+      return {
+        ...common,
+        status: "senal",
+        statusLabel: `El programa se cerró de forma anormal: ${signalName}`,
+      };
+    }
+    if (exitCode == null) {
+      return {
+        ...common,
+        status: "error_ejecucion",
+        statusLabel: "El programa terminó sin informar de su código de salida",
+      };
+    }
+    if (exitCode !== 0) {
+      return {
+        ...common,
+        status: "error_ejecucion",
+        statusLabel: `El programa terminó con código ${exitCode}`,
+      };
+    }
+    return { ...common, status: "ok", statusLabel: "El programa terminó correctamente (código 0)" };
+  } finally {
+    clearTimeout(timer);
   }
-  if (waitingForInput && mode === "interactive") {
-    return { ...common, status: "entrada", statusLabel: "El programa está leyendo de la entrada" };
-  }
-  if (signalName) {
-    return {
-      ...common,
-      status: "senal",
-      statusLabel: `El programa se cerró de forma anormal: ${signalName}`,
-    };
-  }
-  if (exitCode == null) {
-    return {
-      ...common,
-      status: "error_ejecucion",
-      statusLabel: "El programa terminó sin informar de su código de salida",
-    };
-  }
-  if (exitCode !== 0) {
-    return {
-      ...common,
-      status: "error_ejecucion",
-      statusLabel: `El programa terminó con código ${exitCode}`,
-    };
-  }
-  return { ...common, status: "ok", statusLabel: "El programa terminó correctamente (código 0)" };
 }
 
 function base(): RunResult {
@@ -287,6 +410,8 @@ function base(): RunResult {
     stdout: "",
     stdoutFull: "",
     waitingForInput: false,
+    interactive: true,
+    notice: null,
     stderr: "",
     exitCode: null,
     signal: null,
@@ -306,7 +431,7 @@ function service(message: string): RunResult {
   };
 }
 
-/** Transcripción en texto plano, la que se guarda junto a la entrega. */
+/** Transcripción en texto plano de una ejecución suelta (modo lote). */
 export function formatRunResult(result: RunResult): string {
   const blocks = [
     `$ ${result.commandLine}`,

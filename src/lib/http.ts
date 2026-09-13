@@ -16,7 +16,18 @@ export function serverError(error: unknown) {
   const message = error instanceof Error ? error.message : "Error inesperado.";
   // Falta configuración: no es un fallo del código, es un despliegue a medio hacer.
   if (error instanceof ConfigError) return json({ error: message, code: "config" }, 503);
-  return json({ error: message }, 500);
+  // El detalle (que puede nombrar tablas, roles o permisos) va al registro del
+  // servidor; al cliente sólo le llega que la operación falló.
+  console.error("[miguel-cpp-lab]", message);
+  return json({ error: "No se pudo completar la operación. Vuelve a intentarlo." }, 500);
+}
+
+/** Recorta sin partir un par suplente (emojis y demás caracteres largos). */
+export function clip(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const cut = value.slice(0, max);
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
 }
 
 export async function readJson(request: Request): Promise<Record<string, unknown> | null> {

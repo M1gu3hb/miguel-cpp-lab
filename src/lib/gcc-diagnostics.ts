@@ -22,6 +22,13 @@ export type CompilerNote = {
 /** El fichero del alumno; el prólogo inyectado usa #line para que coincida. */
 export const STUDENT_FILE = "main.cpp";
 
+/** Nombres con los que el compilador puede referirse al fichero del alumno. */
+const SOURCE_NAMES = new Set([STUDENT_FILE, "<source>", "example.cpp"]);
+
+function isStudentFile(file: string | undefined): boolean {
+  return !file || SOURCE_NAMES.has(file);
+}
+
 // Secuencias ANSI: CSI (incluye parámetros privados como ?25l) y OSC.
 const ANSI = new RegExp(
   `${String.fromCharCode(27)}(?:\\[[0-9;?]*[ -/]*[@-~]|\\][^${String.fromCharCode(7)}]*(?:${String.fromCharCode(
@@ -62,11 +69,68 @@ export type GodboltLine = {
 };
 
 /**
+ * Reescribe la salida del compilador para que hable del fichero del alumno: el
+ * prólogo que se inyecta antes de su código desplaza los números de línea, así
+ * que se restan aquí, tanto en los "fichero:línea:columna" como en el fragmento
+ * de código con el caret que g++ imprime debajo. Así se conserva el mensaje
+ * entero (que es lo que vería en su terminal) con los números de su editor.
+ */
+export function remapCompilerOutput(text: string, offset: number): string {
+  if (!text) return "";
+  // El fragmento de código que g++ imprime debajo ("   12 | int main() {") sólo
+  // se renumera si el diagnóstico anterior hablaba del fichero del alumno: si
+  // venía de una cabecera del sistema, sus números son los de esa cabecera.
+  let inStudentFile = true;
+
+  return text
+    .split("\n")
+    .map((line) => {
+      // "In file included from X:N:" y sus continuaciones "     from X:N:"
+      const included = line.match(/^(In file included from|\s+from)\s+(.+?):(\d+)(.*)$/);
+      if (included) {
+        const own = isStudentFile(included[2]);
+        const number = Number(included[3]) - (own ? offset : 0);
+        if (own && number < 1) return null; // la inclusión la hizo el prólogo
+        inStudentFile = own;
+        return `${included[1]} ${own ? STUDENT_FILE : included[2]}:${number}${included[4]}`;
+      }
+
+      const position = line.match(/^(.+?):(\d+)(:\d+)?:(.*)$/);
+      if (position) {
+        const own = isStudentFile(position[1]);
+        inStudentFile = own;
+        if (!own) return line;
+        const number = Number(position[2]) - offset;
+        if (number < 1) return null; // el diagnóstico apunta al prólogo
+        return `${STUDENT_FILE}:${number}${position[3] ?? ""}:${position[4]}`;
+      }
+
+      const header = line.match(/^(.+?):(\s+(?:In |At ).*)$/);
+      if (header) {
+        const own = isStudentFile(header[1]);
+        inStudentFile = own;
+        return own ? `${STUDENT_FILE}:${header[2]}` : line;
+      }
+
+      const caret = line.match(/^(\s*)(\d+)(\s*\|.*)$/);
+      if (caret && inStudentFile) {
+        const number = Number(caret[2]) - offset;
+        if (number < 1) return null;
+        return `${caret[1]}${number}${caret[3]}`;
+      }
+      return line;
+    })
+    .filter((line): line is string => line !== null)
+    .join("\n");
+}
+
+/**
  * Compiler Explorer ya entrega los diagnósticos estructurados en `tag`.
  * Se usan esos y, para las líneas que no traen tag (errores del enlazador,
- * del driver…), se cae al texto.
+ * del driver…), se cae al texto. `offset` son las líneas que el prólogo añadió
+ * por delante del código del alumno.
  */
-export function parseDiagnostics(lines: GodboltLine[] | undefined): CompilerNote[] {
+export function parseDiagnostics(lines: GodboltLine[] | undefined, offset = 0): CompilerNote[] {
   if (!Array.isArray(lines)) return [];
   const notes: CompilerNote[] = [];
 
@@ -74,13 +138,16 @@ export function parseDiagnostics(lines: GodboltLine[] | undefined): CompilerNote
     const tag = entry?.tag;
     if (tag && typeof tag.line === "number") {
       const message = stripAnsi(tag.text ?? "").replace(/^(fatal error|error|warning|note):\s*/, "");
+      const own = isStudentFile(tag.file);
+      const line = own ? tag.line - offset : tag.line;
+      if (own && line < 1) continue; // diagnóstico del prólogo, no del alumno
       notes.push({
-        file: tag.file || STUDENT_FILE,
-        line: tag.line,
+        file: own ? STUDENT_FILE : (tag.file as string),
+        line,
         column: typeof tag.column === "number" && tag.column > 0 ? tag.column : null,
         severity: severityFromCode(tag.severity),
         message,
-        inSource: !tag.file || tag.file === STUDENT_FILE || tag.file === "<source>",
+        inSource: own,
       });
       continue;
     }
@@ -91,13 +158,16 @@ export function parseDiagnostics(lines: GodboltLine[] | undefined): CompilerNote
     const diag = raw.match(DIAG);
     if (diag) {
       const file = diag[1];
+      const own = isStudentFile(file);
+      const line = own ? Number(diag[2]) - offset : Number(diag[2]);
+      if (own && line < 1) continue;
       notes.push({
-        file,
-        line: Number(diag[2]),
+        file: own ? STUDENT_FILE : file,
+        line,
         column: diag[3] ? Number(diag[3]) : null,
         severity: severityOf(diag[4]),
         message: diag[5],
-        inSource: file === STUDENT_FILE || file === "<source>",
+        inSource: own,
       });
       continue;
     }

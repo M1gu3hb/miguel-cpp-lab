@@ -13,13 +13,20 @@ type Props = {
 };
 
 /**
- * La terminal. Sólo pinta lo que el programa escribió y hace de línea de
- * entrada cuando el programa está pidiendo datos: nada de prompts inventados.
+ * La terminal. Pinta lo que el programa escribió y hace de línea de entrada
+ * cuando el programa está pidiendo datos: nada de prompts inventados.
+ *
+ * El campo de entrada no se desmonta mientras se reejecuta el programa —así no
+ * se pierde ni una pulsación y en el móvil no se cierra el teclado—: lo que se
+ * teclee durante ese rato se envía en cuanto el programa vuelve a pedir datos.
  */
 function TerminalView({ segments, phase, onLine, onEof, onCancel, onStart }: Props) {
   const [draft, setDraft] = useState("");
+  const [queued, setQueued] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const live = phase === "waiting" || phase === "running";
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -30,19 +37,36 @@ function TerminalView({ segments, phase, onLine, onEof, onCancel, onStart }: Pro
     if (phase === "waiting") inputRef.current?.focus();
   }, [phase]);
 
+  // Lo tecleado mientras el programa se reejecutaba sale en cuanto vuelve a
+  // pedir entrada.
+  useEffect(() => {
+    if (phase === "waiting" && queued !== null) {
+      const text = queued;
+      setQueued(null);
+      onLine(text);
+    }
+  }, [phase, queued, onLine]);
+
   function handleKey(event: React.KeyboardEvent<HTMLInputElement>) {
     if (event.key === "Enter") {
       event.preventDefault();
-      onLine(draft);
+      if (phase === "waiting") {
+        onLine(draft);
+      } else {
+        setQueued(draft);
+      }
       setDraft("");
       return;
     }
-    if (event.key === "d" && event.ctrlKey) {
+    if (event.ctrlKey && (event.key === "d" || event.key === "D")) {
       event.preventDefault();
       onEof();
       return;
     }
-    if (event.key === "c" && event.ctrlKey) {
+    // Ctrl+C sólo corta si no hay texto seleccionado: si lo hay, se copia.
+    if (event.ctrlKey && (event.key === "c" || event.key === "C")) {
+      const selection = window.getSelection?.();
+      if (selection && !selection.isCollapsed) return;
       event.preventDefault();
       onCancel();
     }
@@ -52,7 +76,12 @@ function TerminalView({ segments, phase, onLine, onEof, onCancel, onStart }: Pro
     <div
       className="terminal"
       ref={scrollRef}
-      onClick={() => phase === "waiting" && inputRef.current?.focus()}
+      onMouseUp={(event) => {
+        // Un clic para enfocar, pero sin robar el foco si se está seleccionando texto.
+        const selection = window.getSelection?.();
+        if (selection && !selection.isCollapsed) return;
+        if (live && (event.target as HTMLElement).tagName !== "BUTTON") inputRef.current?.focus();
+      }}
     >
       <pre className="terminal-body">
         {segments.map((segment, index) => (
@@ -61,8 +90,8 @@ function TerminalView({ segments, phase, onLine, onEof, onCancel, onStart }: Pro
           </span>
         ))}
 
-        {phase === "waiting" && (
-          <span className="terminal-input">
+        {live && (
+          <span className={`terminal-input${phase === "running" ? " busy" : ""}`}>
             <input
               ref={inputRef}
               value={draft}
@@ -75,11 +104,15 @@ function TerminalView({ segments, phase, onLine, onEof, onCancel, onStart }: Pro
               autoCorrect="off"
               aria-label="Entrada del programa"
             />
-            <span className="caret" aria-hidden />
+            {phase === "waiting" ? (
+              <span className="caret" aria-hidden />
+            ) : (
+              <span className="t-info"> ⟳</span>
+            )}
           </span>
         )}
 
-        {phase === "running" && <span className="t-info">▌</span>}
+        {queued !== null && <span className="t-info">{`\n[${queued} · se enviará al terminar]`}</span>}
       </pre>
 
       {phase === "idle" && (
@@ -95,10 +128,19 @@ function TerminalView({ segments, phase, onLine, onEof, onCancel, onStart }: Pro
         </div>
       )}
 
-      {phase === "waiting" && (
+      {live && (
         <div className="terminal-help">
-          Escribe y pulsa <kbd>Enter</kbd> · <kbd>Ctrl</kbd>+<kbd>D</kbd> cierra la entrada (EOF) ·{" "}
-          <kbd>Ctrl</kbd>+<kbd>C</kbd> corta la sesión
+          {phase === "waiting" ? (
+            <>
+              Escribe y pulsa <kbd>Enter</kbd> · <kbd>Ctrl</kbd>+<kbd>D</kbd> cierra la entrada (EOF)
+              · <kbd>Ctrl</kbd>+<kbd>C</kbd> corta la sesión
+            </>
+          ) : (
+            <>
+              Ejecutando… puedes seguir escribiendo: se enviará en cuanto el programa pida datos ·{" "}
+              <kbd>Ctrl</kbd>+<kbd>C</kbd> corta
+            </>
+          )}
         </div>
       )}
     </div>

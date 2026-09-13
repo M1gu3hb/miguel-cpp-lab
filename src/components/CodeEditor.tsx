@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import dynamic from "next/dynamic";
 import { autocompletion } from "@codemirror/autocomplete";
 import { cpp } from "@codemirror/lang-cpp";
@@ -8,7 +8,8 @@ import { indentUnit } from "@codemirror/language";
 import { diagnosticCount, lintGutter, setDiagnostics } from "@codemirror/lint";
 import { diagnosticMarks, setMarks } from "@/lib/diagnostic-marks";
 import { EditorState, Prec } from "@codemirror/state";
-import { EditorView, keymap } from "@codemirror/view";
+import { search } from "@codemirror/search";
+import { EditorView, keymap, type ViewUpdate } from "@codemirror/view";
 import { vscodeDark } from "@uiw/codemirror-theme-vscode";
 import { cppCompletions } from "@/lib/cpp-completions";
 import { toCmDiagnostics } from "@/lib/cm-diagnostics";
@@ -27,6 +28,26 @@ function paint(view: EditorView, list: ReturnType<typeof toCmDiagnostics>) {
     view.dispatch(setDiagnostics(view.state, list));
   }
 }
+
+/**
+ * Constante de módulo a propósito: @uiw/react-codemirror mete `basicSetup` y
+ * `onUpdate` en las dependencias de su efecto de reconfiguración. Si cambian de
+ * identidad en cada render, el editor se reconfigura en cada tecla —lo que tira
+ * el estado que instalan setDiagnostics y openSearchPanel— y realimenta un bucle
+ * de renders.
+ */
+const BASIC_SETUP = {
+  lineNumbers: true,
+  highlightActiveLine: true,
+  highlightActiveLineGutter: true,
+  foldGutter: true,
+  bracketMatching: true,
+  closeBrackets: true,
+  indentOnInput: true,
+  highlightSelectionMatches: true,
+  autocompletion: false, // lo aporta la extensión de abajo
+  lintKeymap: false, // evita el panel de lint propio de CodeMirror
+} as const;
 
 // CodeMirror toca el DOM: se carga sólo en el navegador.
 const CodeMirror = dynamic(() => import("@uiw/react-codemirror"), {
@@ -66,12 +87,17 @@ export default function CodeEditor({
   // render reconfiguraría el editor y se perderían los diagnósticos ya pintados.
   const runRef = useRef(onRun);
   const submitRef = useRef(onSubmit);
+  const cursorRef = useRef(onCursor);
   runRef.current = onRun;
   submitRef.current = onSubmit;
+  cursorRef.current = onCursor;
 
   const extensions = useMemo(
     () => [
       cpp(),
+      // En la configuración base, para que openSearchPanel no tenga que
+      // añadirla al vuelo (y sobreviva a una reconfiguración).
+      search(),
       indentUnit.of(" ".repeat(tabSize)),
       EditorState.tabSize.of(tabSize),
       lintGutter(),
@@ -107,6 +133,14 @@ export default function CodeEditor({
     // wrap/fontSize/tabSize reconfiguran el editor: hay que volver a pintarlos.
   }, [diagnostics, wrap, fontSize, tabSize]);
 
+  const handleUpdate = useCallback((update: ViewUpdate) => {
+    const report = cursorRef.current;
+    if (!report || (!update.selectionSet && !update.docChanged)) return;
+    const range = update.state.selection.main;
+    const line = update.state.doc.lineAt(range.head);
+    report(line.number, range.head - line.from + 1, range.to - range.from);
+  }, []);
+
   return (
     <div className="editor-wrap">
       <CodeMirror
@@ -117,29 +151,13 @@ export default function CodeEditor({
         onChange={onChange}
         readOnly={readOnly}
         indentWithTab
-        basicSetup={{
-          lineNumbers: true,
-          highlightActiveLine: true,
-          highlightActiveLineGutter: true,
-          foldGutter: true,
-          bracketMatching: true,
-          closeBrackets: true,
-          indentOnInput: true,
-          highlightSelectionMatches: true,
-          autocompletion: false, // lo aporta la extensión de arriba
-          lintKeymap: false, // evita el panel de lint propio de CodeMirror
-        }}
+        basicSetup={BASIC_SETUP}
         onCreateEditor={(view) => {
           viewRef.current = view;
           onViewReady?.(view);
           if (diagnostics.length) paint(view, toCmDiagnostics(view.state.doc, diagnostics));
         }}
-        onUpdate={(view) => {
-          if (!onCursor) return;
-          const range = view.state.selection.main;
-          const line = view.state.doc.lineAt(range.head);
-          onCursor(line.number, range.head - line.from + 1, range.to - range.from);
-        }}
+        onUpdate={handleUpdate}
         placeholder="// Escribe aquí tu programa en C++"
       />
     </div>

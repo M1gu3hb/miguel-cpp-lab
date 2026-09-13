@@ -161,10 +161,10 @@ export default function ProfessorPage() {
                   />
                 </label>
               )}
-              <button type="submit" className="primary" disabled={busy || keyInput.trim().length < 8}>
+              <button type="submit" className="primary" disabled={busy || keyInput.trim().length < 10}>
                 {busy ? "Comprobando…" : firstTime ? "Guardar contraseña" : "Entrar"}
               </button>
-              {firstTime && <p className="hint">Mínimo 8 caracteres.</p>}
+              {firstTime && <p className="hint">Mínimo 10 caracteres.</p>}
             </form>
           )}
 
@@ -360,8 +360,8 @@ function ReviewDetail({
     notes: submission.reviewNotes,
   }));
   const [editingLine, setEditingLine] = useState<number | null>(null);
-  const [noteText, setNoteText] = useState("");
-  const [noteKind, setNoteKind] = useState<NoteKind>("error");
+  // Un borrador por línea: pulsar otra línea no tira lo que se estaba escribiendo.
+  const [lineDrafts, setLineDrafts] = useState<Record<number, { text: string; kind: NoteKind }>>({});
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
@@ -372,31 +372,49 @@ function ReviewDetail({
   const lines = useMemo(() => submission.code.split("\n"), [submission.code]);
   const storageKey = `${DRAFT_PREFIX}${submission.id}`;
 
+  // Hay cambios sin publicar: gobierna el borrador local y el aviso de la ficha.
+  const dirty =
+    draft.status !== submission.reviewStatus ||
+    draft.feedback !== submission.feedback ||
+    draft.title.trim() !== submission.title ||
+    JSON.stringify(draft.notes.map((n) => [n.line, n.kind, n.body])) !==
+      JSON.stringify(submission.reviewNotes.map((n) => [n.line, n.kind, n.body]));
+
   // Borrador local: la revisión a medias no se pierde al recargar, pero tampoco
   // se publica sola.
   useEffect(() => {
     try {
       const raw = window.localStorage.getItem(storageKey);
-      if (raw) {
-        const stored = JSON.parse(raw) as Draft;
-        if (stored && typeof stored === "object") {
-          setDraft((current) => ({ ...current, ...stored, notes: stored.notes ?? current.notes }));
-        }
+      if (!raw) return;
+      const stored = JSON.parse(raw) as { savedAt?: string; draft?: Draft };
+      const savedAt = stored?.savedAt ? Date.parse(stored.savedAt) : 0;
+      const reviewedAt = submission.reviewedAt ? Date.parse(submission.reviewedAt) : 0;
+      // Si se publicó una revisión después de guardar el borrador, manda lo publicado.
+      const saved = stored?.draft;
+      if (!saved || (reviewedAt && savedAt && reviewedAt > savedAt)) {
+        window.localStorage.removeItem(storageKey);
+        return;
       }
+      setDraft((current) => ({ ...current, ...saved, notes: saved.notes ?? current.notes }));
     } catch {
       // el borrador local es una comodidad
     }
-  }, [storageKey]);
+  }, [storageKey, submission.reviewedAt]);
 
   useEffect(() => {
+    if (!dirty) return;
     const id = window.setTimeout(() => {
       try {
-        window.localStorage.setItem(storageKey, JSON.stringify(draft));
+        window.localStorage.setItem(
+          storageKey,
+          JSON.stringify({ savedAt: new Date().toISOString(), draft }),
+        );
       } catch {
         // idem
       }
     }, 300);
     return () => window.clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft, storageKey]);
 
   const notesByLine = useMemo(() => {
@@ -410,24 +428,34 @@ function ReviewDetail({
   }, [draft.notes]);
 
   function openEditor(line: number) {
-    setEditingLine(line);
-    setNoteText("");
-    setNoteKind("error");
+    setEditingLine((current) => (current === line ? null : line));
+    setLineDrafts((current) => (current[line] ? current : { ...current, [line]: { text: "", kind: "error" } }));
   }
 
-  function addNote() {
-    const body = noteText.trim();
-    if (!body || editingLine == null) return;
+  function updateLineDraft(line: number, patch: Partial<{ text: string; kind: NoteKind }>) {
+    setLineDrafts((current) => ({
+      ...current,
+      [line]: { text: current[line]?.text ?? "", kind: current[line]?.kind ?? "error", ...patch },
+    }));
+  }
+
+  function addNote(line: number) {
+    const body = (lineDrafts[line]?.text ?? "").trim();
+    if (!body) return;
     const note: ReviewNote = {
       id: `n_${Math.random().toString(36).slice(2, 10)}`,
-      line: editingLine,
-      kind: noteKind,
+      line,
+      kind: lineDrafts[line]?.kind ?? "error",
       body,
       createdAt: new Date().toISOString(),
     };
     setDraft((current) => ({ ...current, notes: [...current.notes, note].sort((a, b) => a.line - b.line) }));
     setEditingLine(null);
-    setNoteText("");
+    setLineDrafts((current) => {
+      const next = { ...current };
+      delete next[line];
+      return next;
+    });
   }
 
   function removeNote(id: string) {
@@ -496,13 +524,6 @@ function ReviewDetail({
     }
   }
 
-  const dirty =
-    draft.status !== submission.reviewStatus ||
-    draft.feedback !== submission.feedback ||
-    draft.title.trim() !== submission.title ||
-    JSON.stringify(draft.notes.map((n) => [n.line, n.kind, n.body])) !==
-      JSON.stringify(submission.reviewNotes.map((n) => [n.line, n.kind, n.body]));
-
   return (
     <div className="detail">
       <div className="detail-head">
@@ -528,16 +549,19 @@ function ReviewDetail({
                 const notes = notesByLine.get(number) ?? [];
                 return (
                   <div key={number}>
-                    <div
+                    <button
+                      type="button"
                       className={`code-line ${notes.length ? "has-note" : ""}`}
                       onClick={() => openEditor(number)}
+                      aria-expanded={editingLine === number}
+                      aria-label={`Línea ${number}: ${text || "(vacía)"}. Añadir nota.`}
                     >
                       <span className="ln">{number}</span>
                       <span className="add" aria-hidden>
                         +
                       </span>
                       <span className="src">{text ? highlightCpp(text, String(number)) : " "}</span>
-                    </div>
+                    </button>
 
                     {notes.map((note) => (
                       <div key={note.id} className="line-note">
@@ -565,8 +589,8 @@ function ReviewDetail({
                               <button
                                 key={kind}
                                 type="button"
-                                className={`${kind} ${noteKind === kind ? "active" : ""}`}
-                                onClick={() => setNoteKind(kind)}
+                                className={`${kind} ${(lineDrafts[number]?.kind ?? "error") === kind ? "active" : ""}`}
+                                onClick={() => updateLineDraft(number, { kind })}
                               >
                                 {NOTE_LABELS[kind]}
                               </button>
@@ -574,17 +598,22 @@ function ReviewDetail({
                           </div>
                           <textarea
                             autoFocus
-                            value={noteText}
+                            value={lineDrafts[number]?.text ?? ""}
                             maxLength={2000}
                             placeholder={`Nota para la línea ${number}`}
-                            onChange={(event) => setNoteText(event.target.value)}
+                            onChange={(event) => updateLineDraft(number, { text: event.target.value })}
                             onKeyDown={(event) => {
-                              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) addNote();
+                              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) addNote(number);
                               if (event.key === "Escape") setEditingLine(null);
                             }}
                           />
                           <div className="note-actions">
-                            <button type="button" className="primary" onClick={addNote} disabled={!noteText.trim()}>
+                            <button
+                              type="button"
+                              className="primary"
+                              onClick={() => addNote(number)}
+                              disabled={!(lineDrafts[number]?.text ?? "").trim()}
+                            >
                               Añadir nota
                             </button>
                             <button type="button" className="ghost" onClick={() => setEditingLine(null)}>

@@ -131,7 +131,7 @@ export function sanitizeNotes(raw: unknown, code: string): ReviewNote[] {
     const createdAt =
       typeof candidate.createdAt === "string" && !Number.isNaN(Date.parse(candidate.createdAt))
         ? new Date(candidate.createdAt).toISOString()
-        : new Date(0).toISOString();
+        : new Date().toISOString();
 
     notes.push({ id, line: clamped, kind, body: body.slice(0, LIMITS.noteBody), createdAt });
     if (notes.length >= LIMITS.notes) break;

@@ -1,6 +1,7 @@
 import { authorizeProfessor } from "@/lib/auth";
 import { getSubmission, reviewSubmission } from "@/lib/db";
-import { fail, isUuid, json, readJson, serverError, str } from "@/lib/http";
+import { clip, fail, isUuid, json, readJson, serverError, str } from "@/lib/http";
+import { clientKey, rateLimit } from "@/lib/rate-limit";
 import { LIMITS, NOTE_KINDS, normalizeStatus, sanitizeNotes } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -17,6 +18,11 @@ export const runtime = "nodejs";
  */
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    const limit = rateLimit(clientKey(request, "clave"), 30, 60_000);
+    if (!limit.ok) {
+      return fail(`Demasiados intentos. Prueba en ${limit.retryAfter} s.`, 429);
+    }
+
     const body = await readJson(request);
     if (!body) return fail("El cuerpo debe ser JSON válido.");
 
@@ -31,12 +37,13 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       return fail('El campo "status" debe ser pendiente, correcto o necesita_correccion.');
     }
 
-    const feedback = str(body.feedback);
-    if (feedback.length > LIMITS.feedback) {
+    // Omitir un campo significa "no lo toques"; mandarlo vacío sí lo borra.
+    const feedback = body.feedback === undefined ? null : str(body.feedback);
+    if (feedback !== null && feedback.length > LIMITS.feedback) {
       return fail(`El feedback supera el máximo de ${LIMITS.feedback} caracteres.`, 413);
     }
 
-    const title = str(body.title).trim().slice(0, LIMITS.title) || null;
+    const title = body.title === undefined ? null : clip(str(body.title).trim(), LIMITS.title) || null;
 
     // Las notas se validan contra el código real de la entrega antes de escribir:
     // una línea fuera de rango se rechaza, no se recorta en silencio.
@@ -69,6 +76,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         }
       }
       notes = sanitizeNotes(body.notes, submission.code);
+      if (JSON.stringify(notes).length > 40_000) {
+        return fail("Las notas ocupan demasiado: reduce el texto o el número de notas.", 413);
+      }
     }
 
     const submission = await reviewSubmission({ id, status, feedback, title, notes, key: auth.key });

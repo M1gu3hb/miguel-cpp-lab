@@ -1,5 +1,6 @@
 import { setProfessorKey } from "@/lib/db";
 import { fail, json, readJson, serverError, str } from "@/lib/http";
+import { clientKey, rateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -11,9 +12,14 @@ export const runtime = "nodejs";
  */
 export async function POST(request: Request) {
   try {
+    const limit = rateLimit(clientKey(request, "clave"), 10, 60_000);
+    if (!limit.ok) {
+      return fail(`Demasiados intentos. Prueba en ${limit.retryAfter} s.`, 429);
+    }
+
     const body = await readJson(request);
     const key = str(body?.key).trim();
-    if (key.length < 8) return fail("La clave debe tener al menos 8 caracteres.");
+    if (key.length < 10) return fail("La clave debe tener al menos 10 caracteres.");
 
     await setProfessorKey(key);
     return json({ ok: true });
@@ -29,7 +35,7 @@ export async function POST(request: Request) {
         403,
       );
     }
-    if (message.includes("al menos 8")) return fail("La clave debe tener al menos 8 caracteres.");
+    if (message.includes("al menos 10")) return fail("La clave debe tener al menos 10 caracteres.");
     return serverError(error);
   }
 }
