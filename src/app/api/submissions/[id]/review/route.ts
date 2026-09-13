@@ -1,7 +1,7 @@
 import { authorizeProfessor } from "@/lib/auth";
 import { getSubmission, reviewSubmission } from "@/lib/db";
 import { fail, json, readJson, serverError, str } from "@/lib/http";
-import { LIMITS, normalizeStatus, sanitizeNotes } from "@/lib/types";
+import { LIMITS, NOTE_KINDS, normalizeStatus, sanitizeNotes } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -36,18 +36,37 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     const title = str(body.title).trim().slice(0, LIMITS.title) || null;
 
-    // Las notas se validan contra el código real de la entrega antes de escribir.
+    // Las notas se validan contra el código real de la entrega antes de escribir:
+    // una línea fuera de rango se rechaza, no se recorta en silencio.
     let notes = null;
     if (body.notes !== undefined) {
       if (!Array.isArray(body.notes)) return fail('El campo "notes" debe ser una lista.');
+      if (body.notes.length > LIMITS.notes) {
+        return fail(`Como mucho ${LIMITS.notes} notas por entrega.`, 413);
+      }
       const submission = await getSubmission(id);
       if (!submission) return fail("Entrega no encontrada.", 404);
-      notes = sanitizeNotes(body.notes, submission.code);
-      if (notes.length !== body.notes.length) {
-        return fail(
-          "Alguna nota no es válida: necesita line (dentro del código) y body (1-2000 caracteres).",
-        );
+
+      const totalLines = submission.code.split("\n").length;
+      for (const raw of body.notes) {
+        const note = raw as Record<string, unknown>;
+        if (!note || typeof note !== "object") return fail("Cada nota debe ser un objeto.");
+        const line = Number(note.line);
+        if (!Number.isInteger(line) || line < 1 || line > totalLines) {
+          return fail(
+            `Cada nota necesita "line" entre 1 y ${totalLines} (las líneas del código entregado).`,
+          );
+        }
+        const text = typeof note.body === "string" ? note.body.trim() : "";
+        if (!text) return fail('Cada nota necesita "body" con texto.');
+        if (text.length > LIMITS.noteBody) {
+          return fail(`Una nota supera los ${LIMITS.noteBody} caracteres.`, 413);
+        }
+        if (note.kind !== undefined && !(NOTE_KINDS as readonly string[]).includes(String(note.kind))) {
+          return fail('El campo "kind" debe ser error, sugerencia o elogio.');
+        }
       }
+      notes = sanitizeNotes(body.notes, submission.code);
     }
 
     const submission = await reviewSubmission({ id, status, feedback, title, notes, key: auth.key });
