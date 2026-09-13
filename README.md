@@ -35,8 +35,18 @@ por adivinación:
    de fingir continuidad.
 
 El mismo prólogo pone `std::cout` sin búfer —así un programa que muere por una señal no
-pierde lo que había impreso— y termina con `#line 1 "main.cpp"` para que los errores del
-compilador sigan citando las líneas del alumno.
+pierde lo que había impreso— y sobrevive a `ios::sync_with_stdio(false)`, que reinstala el
+buffer de `cin` y dejaría el detector desconectado. La marca lleva un token aleatorio en
+cada ejecución, para que el código del alumno no pueda falsificarla.
+
+Dos honestidades más:
+
+- Los programas que leen con `scanf`, `getchar` o `fgets` no pasan por `std::cin`: no hay
+  sesión interactiva posible, y la app lo dice y ejecuta en lote, en vez de fingirla.
+- Como el prólogo incluye `<iostream>`, un programa al que le falte ese `#include`
+  compilaría aquí y no con g++ a secas. Por eso se compila **también** el código tal cual
+  lo escribió el alumno, y si ese falla, mandan sus errores. Los números de línea y el
+  fragmento con el `^~~~` que imprime g++ se reubican para que citen las líneas del editor.
 
 ## Atajos
 
@@ -94,7 +104,8 @@ variables de entorno:
 1. La primera vez, `/profesor` pide **definir** la contraseña.
 2. Se guarda como hash bcrypt en `cpp_lab_secrets`, tabla sin permisos para ningún rol
    de la API.
-3. El alta sólo funciona mientras haya una **ventana de alta** abierta, para que nadie
+3. Mínimo 10 caracteres; se guarda con bcrypt (coste 11).
+4. El alta sólo funciona mientras haya una **ventana de alta** abierta, para que nadie
    pueda adelantarse. Se abre desde el SQL Editor de Supabase:
 
    ```sql
@@ -118,8 +129,17 @@ curl -X POST https://miguel-cpp-lab.vercel.app/api/professor/rotate \
 - Una entrega nace siempre `pendiente` y sin notas (lo fuerza la policy de `INSERT`).
 - La revisión pasa por `cpp_lab_review_submission(...)`, `SECURITY DEFINER`, que exige la
   contraseña y valida cada nota contra el código real de la entrega.
+- El rol anónimo sólo puede rellenar `title`, `code`, `stdin` y `compiler_output`: no
+  puede forjar `id`, `created_at` ni el estado de una entrega.
 - `cpp_lab_secrets` y `cpp_lab_setup_window` no tienen permisos para `anon` ni
   `authenticated`.
+- Hay un límite de peticiones por minuto en `/api/run`, en la creación de entregas y en
+  los endpoints de contraseña. Es en memoria del proceso: frena bucles accidentales y
+  scripts curiosos, no a un atacante decidido.
+- **Las lecturas son públicas a propósito**: `GET /api/submissions` y `/latest` no piden
+  clave, que es justo lo que permite a un agente externo consultar la última entrega. El
+  código de los ejercicios se considera no confidencial; si algún día deja de serlo, hay
+  que poner la clave también en la lectura.
 
 ## API
 
@@ -188,6 +208,8 @@ curl -X POST https://miguel-cpp-lab.vercel.app/api/submissions/<id>/review \
 - `status`: `pendiente` | `correcto` | `necesita_correccion` (acepta también
   `"necesita corrección"` y variantes con guion).
 - `title` es opcional.
+- `feedback` y `title` también son opcionales: si no se mandan, se quedan como estaban;
+  mandar `"feedback": ""` sí lo borra.
 - `notes` es opcional: si no se manda, las notas quedan como estaban; `[]` las borra.
   Cada nota necesita `line` (entre 1 y el número de líneas del código entregado) y
   `body` (1–2000 caracteres); `kind` es `error` (por defecto), `sugerencia` o `elogio`.
@@ -202,6 +224,8 @@ Responde `{ "submission": { … } }` con `reviewedAt` actualizado.
 
 `mode` `"interactive"` corta la salida donde el programa pide entrada y responde
 `waitingForInput: true`; `"batch"` (por defecto) devuelve la ejecución completa.
+`interactive: false` y `notice` avisan de que ese programa no puede tener sesión
+interactiva (por ejemplo, porque lee con `scanf`).
 Devuelve además `status`, `statusLabel`, `commandLine`, `compileOutput`, `diagnostics`
 (línea, columna y severidad de cada mensaje de g++), `stdout`, `stdoutFull`, `stderr`,
 `exitCode`, `signal`, `timedOut`, `truncated`, `timeMs` y `console` (la transcripción).
