@@ -1,6 +1,6 @@
 import { authorizeProfessor } from "@/lib/auth";
 import { getSubmission, reviewSubmission } from "@/lib/db";
-import { fail, json, readJson, serverError, str } from "@/lib/http";
+import { fail, isUuid, json, readJson, serverError, str } from "@/lib/http";
 import { LIMITS, NOTE_KINDS, normalizeStatus, sanitizeNotes } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -24,6 +24,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     if (!auth.ok) return fail(auth.message, auth.status);
 
     const { id } = await context.params;
+    if (!isUuid(id)) return fail("El identificador no tiene forma de UUID.", 400);
+
     const status = normalizeStatus(body.status ?? body.reviewStatus);
     if (!status) {
       return fail('El campo "status" debe ser pendiente, correcto o necesita_correccion.');

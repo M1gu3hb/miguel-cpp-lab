@@ -28,6 +28,17 @@ export async function readJson(request: Request): Promise<Record<string, unknown
   }
 }
 
+/**
+ * PostgreSQL no admite el carácter NUL dentro de un texto: si se cuela, la
+ * escritura falla con un 500 que no explica nada. Se limpia en la puerta.
+ */
 export function str(value: unknown, fallback = ""): string {
-  return typeof value === "string" ? value : fallback;
+  if (typeof value !== "string") return fallback;
+  return value.replace(/\u0000/g, "");
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isUuid(value: string): boolean {
+  return UUID.test(value);
 }

@@ -1,5 +1,5 @@
 import { getSubmission } from "@/lib/db";
-import { fail, json, serverError } from "@/lib/http";
+import { fail, isUuid, json, serverError } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -8,6 +8,7 @@ export const runtime = "nodejs";
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await context.params;
+    if (!isUuid(id)) return fail("El identificador no tiene forma de UUID.", 400);
     const submission = await getSubmission(id);
     if (!submission) return fail("Entrega no encontrada.", 404);
     return json(submission);
