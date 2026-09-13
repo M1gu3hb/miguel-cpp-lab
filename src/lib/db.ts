@@ -1,9 +1,15 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { supabaseConfig } from "./env";
-import { toSubmission, type ReviewStatus, type Submission, type SubmissionRow } from "./types";
+import {
+  toSubmission,
+  type ReviewNote,
+  type ReviewStatus,
+  type Submission,
+  type SubmissionRow,
+} from "./types";
 
 const COLUMNS =
-  "id,title,code,stdin,compiler_output,created_at,review_status,feedback,reviewed_at";
+  "id,title,code,stdin,compiler_output,created_at,review_status,feedback,review_notes,reviewed_at";
 
 let client: SupabaseClient | null = null;
 
@@ -75,14 +81,17 @@ export async function createSubmission(input: {
 }
 
 /**
- * La revisión pasa por una función SECURITY DEFINER que exige la clave del
- * profesor: el rol anónimo no tiene UPDATE sobre la tabla.
+ * La revisión pasa por una función SECURITY DEFINER que exige la contraseña del
+ * profesor: el rol anónimo no tiene UPDATE sobre la tabla. Estado, título,
+ * notas generales y notas por línea se publican en una sola escritura.
+ * `notes` a null significa "no tocar las notas"; `[]` significa "borrarlas".
  */
 export async function reviewSubmission(args: {
   id: string;
   status: ReviewStatus;
   feedback: string;
   title?: string | null;
+  notes?: ReviewNote[] | null;
   key: string;
 }): Promise<Submission | null> {
   const { data, error } = await db().rpc("cpp_lab_review_submission", {
@@ -91,6 +100,7 @@ export async function reviewSubmission(args: {
     p_feedback: args.feedback,
     p_title: args.title ?? null,
     p_key: args.key,
+    p_notes: args.notes ?? null,
   });
 
   if (error) throw new Error(`No se pudo guardar la revisión: ${error.message}`);
@@ -98,21 +108,21 @@ export async function reviewSubmission(args: {
   return rows.length ? toSubmission(rows[0]) : null;
 }
 
-/** Comprueba la clave contra la base (y la enlaza en el primer uso). */
+/** Comprueba la contraseña contra el hash guardado. */
 export async function checkProfessorKey(key: string): Promise<boolean> {
   const { data, error } = await db().rpc("cpp_lab_check_professor_key", { p_key: key });
   if (error) throw new Error(`No se pudo verificar la clave: ${error.message}`);
   return data === true;
 }
 
-/** Estado del alta: si ya hay clave y si la ventana de alta sigue abierta. */
+/** Estado del alta: si ya hay contraseña y si la ventana de alta sigue abierta. */
 export async function professorStatus(): Promise<{ bound: boolean; setupOpen: boolean }> {
   const { data, error } = await db().rpc("cpp_lab_professor_status");
   if (error) throw new Error(`No se pudo leer el estado del acceso: ${error.message}`);
   return data as { bound: boolean; setupOpen: boolean };
 }
 
-/** Da de alta la clave del profesor (sólo con la ventana de alta abierta). */
+/** Da de alta la contraseña del profesor (sólo con la ventana de alta abierta). */
 export async function setProfessorKey(key: string): Promise<boolean> {
   const { data, error } = await db().rpc("cpp_lab_set_professor_key", { p_key: key });
   if (error) throw new Error(error.message);

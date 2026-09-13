@@ -1,14 +1,32 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import dynamic from "next/dynamic";
 import { autocompletion } from "@codemirror/autocomplete";
 import { cpp } from "@codemirror/lang-cpp";
 import { indentUnit } from "@codemirror/language";
-import { Prec } from "@codemirror/state";
+import { diagnosticCount, lintGutter, setDiagnostics } from "@codemirror/lint";
+import { diagnosticMarks, setMarks } from "@/lib/diagnostic-marks";
+import { EditorState, Prec } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { vscodeDark } from "@uiw/codemirror-theme-vscode";
 import { cppCompletions } from "@/lib/cpp-completions";
+import { toCmDiagnostics } from "@/lib/cm-diagnostics";
+import { type CompilerNote } from "@/lib/gcc-diagnostics";
+
+/**
+ * La primera llamada a setDiagnostics instala el campo de estado de lint, y ese
+ * mismo despacho ya no llega al campo recién creado. Por eso se comprueba y, si
+ * hace falta, se repite: así los subrayados aparecen también en la primera
+ * compilación.
+ */
+function paint(view: EditorView, list: ReturnType<typeof toCmDiagnostics>) {
+  view.dispatch({ effects: setMarks.of(list) });
+  view.dispatch(setDiagnostics(view.state, list));
+  if (list.length > 0 && diagnosticCount(view.state) === 0) {
+    view.dispatch(setDiagnostics(view.state, list));
+  }
+}
 
 // CodeMirror toca el DOM: se carga sólo en el navegador.
 const CodeMirror = dynamic(() => import("@uiw/react-codemirror"), {
@@ -20,53 +38,80 @@ type Props = {
   value: string;
   onChange: (value: string) => void;
   onRun?: () => void;
-  height?: string;
+  onSubmit?: () => void;
+  onCursor?: (line: number, column: number, selected: number) => void;
+  onViewReady?: (view: EditorView) => void;
+  diagnostics?: CompilerNote[];
   readOnly?: boolean;
+  wrap?: boolean;
+  fontSize?: number;
+  tabSize?: number;
 };
 
 export default function CodeEditor({
   value,
   onChange,
   onRun,
-  height = "480px",
+  onSubmit,
+  onCursor,
+  onViewReady,
+  diagnostics = [],
   readOnly = false,
+  wrap = false,
+  fontSize = 14,
+  tabSize = 4,
 }: Props) {
-  const [cursor, setCursor] = useState({ line: 1, column: 1 });
+  const viewRef = useRef<EditorView | null>(null);
+  // Los callbacks viven en refs: si entraran en el array de extensiones, cada
+  // render reconfiguraría el editor y se perderían los diagnósticos ya pintados.
+  const runRef = useRef(onRun);
+  const submitRef = useRef(onSubmit);
+  runRef.current = onRun;
+  submitRef.current = onSubmit;
 
   const extensions = useMemo(
     () => [
       cpp(),
-      indentUnit.of("    "),
-      EditorView.lineWrapping,
-      autocompletion({
-        override: [cppCompletions],
-        activateOnTyping: true,
-        icons: true,
-      }),
-      // Prec.highest: el atajo debe ganar al keymap por defecto de CodeMirror.
+      indentUnit.of(" ".repeat(tabSize)),
+      EditorState.tabSize.of(tabSize),
+      lintGutter(),
+      diagnosticMarks,
+      ...(wrap ? [EditorView.lineWrapping] : []),
+      EditorView.theme({ "&": { fontSize: `${fontSize}px` } }),
+      autocompletion({ override: [cppCompletions], activateOnTyping: true, icons: true }),
+      // Prec.highest: estos atajos deben ganar al keymap por defecto.
       Prec.highest(
         keymap.of([
+          { key: "Mod-Enter", preventDefault: true, run: () => (runRef.current?.(), true) },
+          { key: "Mod-Shift-Enter", preventDefault: true, run: () => (submitRef.current?.(), true) },
           {
-            key: "Mod-Enter",
-            preventDefault: true,
-            run: () => {
-              onRun?.();
+            // Tab indenta, así que hace falta una salida explícita del editor.
+            key: "Escape",
+            run: (view) => {
+              view.contentDOM.blur();
               return true;
             },
           },
         ]),
       ),
     ],
-    [onRun],
+    [wrap, fontSize, tabSize],
   );
 
-  const lines = value ? value.split("\n").length : 1;
+  // Los diagnósticos vienen del compilador: se pintan con setDiagnostics y
+  // nunca con linter(), que instalaría un analizador local.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    paint(view, toCmDiagnostics(view.state.doc, diagnostics));
+    // wrap/fontSize/tabSize reconfiguran el editor: hay que volver a pintarlos.
+  }, [diagnostics, wrap, fontSize, tabSize]);
 
   return (
     <div className="editor-wrap">
       <CodeMirror
         value={value}
-        height={height}
+        height="100%"
         theme={vscodeDark}
         extensions={extensions}
         onChange={onChange}
@@ -82,25 +127,21 @@ export default function CodeEditor({
           indentOnInput: true,
           highlightSelectionMatches: true,
           autocompletion: false, // lo aporta la extensión de arriba
+          lintKeymap: false, // evita el panel de lint propio de CodeMirror
+        }}
+        onCreateEditor={(view) => {
+          viewRef.current = view;
+          onViewReady?.(view);
+          if (diagnostics.length) paint(view, toCmDiagnostics(view.state.doc, diagnostics));
         }}
         onUpdate={(view) => {
-          const head = view.state.selection.main.head;
-          const line = view.state.doc.lineAt(head);
-          setCursor({ line: line.number, column: head - line.from + 1 });
+          if (!onCursor) return;
+          const range = view.state.selection.main;
+          const line = view.state.doc.lineAt(range.head);
+          onCursor(line.number, range.head - line.from + 1, range.to - range.from);
         }}
         placeholder="// Escribe aquí tu programa en C++"
       />
-      <div className="editor-status">
-        <span>C++17</span>
-        <span>UTF-8</span>
-        <span>
-          Ln {cursor.line}, Col {cursor.column}
-        </span>
-        <span>{lines} líneas</span>
-        <span className="grow" />
-        <span>Ctrl/⌘ + Enter · compilar</span>
-        <span>Ctrl/⌘ + Espacio · sugerencias</span>
-      </div>
     </div>
   );
 }

@@ -3,9 +3,21 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { formatDate } from "@/lib/format";
-import { REVIEW_STATUSES, STATUS_LABELS, type ReviewStatus, type Submission } from "@/lib/types";
+import { highlightCpp } from "@/lib/cpp-highlight";
+import {
+  NOTE_KINDS,
+  NOTE_LABELS,
+  REVIEW_STATUSES,
+  STATUS_LABELS,
+  type NoteKind,
+  type ReviewNote,
+  type ReviewStatus,
+  type Submission,
+} from "@/lib/types";
+import type { RunResult } from "@/lib/run-cpp";
 
 const STORAGE_KEY = "miguel-cpp-lab:professor-key";
+const DRAFT_PREFIX = "cpp-lab:review:";
 
 type Status = { bound: boolean; setupOpen: boolean };
 
@@ -101,17 +113,19 @@ export default function ProfessorPage() {
     const blocked = !status.bound && !status.setupOpen;
 
     return (
-      <div className="shell">
-        <header className="topbar">
+      <div className="prof">
+        <header className="titlebar">
           <div className="brand">
             <span>
               Miguel <span className="dot">C++</span> Lab
             </span>
             <small>profesor</small>
           </div>
-          <nav>
-            <Link href="/">/ alumno</Link>
-          </nav>
+          <div className="titlebar-actions">
+            <Link href="/" className="link-plain">
+              / alumno
+            </Link>
+          </div>
         </header>
 
         <div className="gate">
@@ -167,22 +181,28 @@ export default function ProfessorPage() {
   return <ReviewBoard professorKey={key} onSignOut={signOut} />;
 }
 
-type Filter = "todas" | "pendiente" | "revisadas";
+type Filter = "pendientes" | "todas" | "revisadas";
 
 function ReviewBoard({ professorKey, onSignOut }: { professorKey: string; onSignOut: () => void }) {
   const [submissions, setSubmissions] = useState<Submission[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<Filter>("todas");
+  const [filter, setFilter] = useState<Filter>("pendientes");
   const [query, setQuery] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const response = await fetch("/api/submissions", { cache: "no-store" });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail?.error ?? `El servidor respondió ${response.status}.`);
+      }
       const data = await response.json();
-      if (!response.ok) throw new Error(data?.error ?? "No se pudieron cargar las entregas.");
-      setSubmissions(data.items ?? []);
+      const items: Submission[] = data.items ?? [];
+      setSubmissions(items);
+      setSelectedId((current) => current ?? items[0]?.id ?? null);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "No se pudieron cargar las entregas.");
@@ -203,7 +223,7 @@ function ReviewBoard({ professorKey, onSignOut }: { professorKey: string; onSign
       const byFilter =
         filter === "todas"
           ? true
-          : filter === "pendiente"
+          : filter === "pendientes"
             ? item.reviewStatus === "pendiente"
             : item.reviewStatus !== "pendiente";
       const byQuery =
@@ -214,125 +234,236 @@ function ReviewBoard({ professorKey, onSignOut }: { professorKey: string; onSign
     });
   }, [submissions, filter, query]);
 
+  const selected = submissions.find((item) => item.id === selectedId) ?? visible[0] ?? null;
+
   function replace(updated: Submission) {
     setSubmissions((current) => current.map((item) => (item.id === updated.id ? updated : item)));
   }
 
+  function next() {
+    const index = visible.findIndex((item) => item.id === selected?.id);
+    const candidate = visible[index + 1] ?? visible[0];
+    if (candidate) setSelectedId(candidate.id);
+  }
+
   return (
-    <div className="shell">
-      <header className="topbar">
+    <div className="prof">
+      <header className="titlebar">
         <div className="brand">
           <span>
             Miguel <span className="dot">C++</span> Lab
           </span>
           <small>profesor</small>
         </div>
-        <nav>
-          <span className="filename">
+        <div className="titlebar-actions">
+          <span className="muted-chip">
             {submissions.length} entregas · {pending} sin revisar
           </span>
-          <Link href="/">/ alumno</Link>
+          <button type="button" onClick={() => void load()} disabled={loading}>
+            {loading ? "Cargando…" : "Actualizar"}
+          </button>
+          <Link href="/" className="link-plain">
+            / alumno
+          </Link>
           <button type="button" className="ghost" onClick={onSignOut}>
             Salir
           </button>
-        </nav>
+        </div>
       </header>
 
-      <main className="layout single">
-        <div className="column">
-          <div className="panel toolbar">
+      <div className="prof-body">
+        <aside className="queue">
+          <div className="queue-tools">
             <div className="segmented">
-              {(["todas", "pendiente", "revisadas"] as Filter[]).map((value) => (
+              {(["pendientes", "todas", "revisadas"] as Filter[]).map((value) => (
                 <button
                   key={value}
                   type="button"
                   className={filter === value ? "active" : ""}
                   onClick={() => setFilter(value)}
                 >
-                  {value === "todas"
-                    ? "Todas"
-                    : value === "pendiente"
-                      ? `Sin revisar (${pending})`
-                      : "Revisadas"}
+                  {value === "pendientes" ? `Sin revisar (${pending})` : value === "todas" ? "Todas" : "Revisadas"}
                 </button>
               ))}
             </div>
             <input
               type="text"
-              className="search"
               placeholder="Buscar por nombre o código…"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
             />
-            <span className="grow" />
-            <button type="button" onClick={() => void load()} disabled={loading}>
-              {loading ? "Cargando…" : "Actualizar"}
-            </button>
             {error && <span className="notice error">{error}</span>}
           </div>
 
-          {loading && submissions.length === 0 ? (
-            <p className="empty">Cargando entregas…</p>
-          ) : visible.length === 0 ? (
-            <p className="empty">No hay entregas que mostrar.</p>
-          ) : (
-            visible.map((submission) => (
-              <ReviewCard
-                key={submission.id}
-                submission={submission}
-                professorKey={professorKey}
-                onUpdated={replace}
-              />
-            ))
-          )}
-        </div>
-      </main>
+          <div className="queue-list">
+            {visible.length === 0 ? (
+              <p className="empty">No hay entregas que mostrar.</p>
+            ) : (
+              visible.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`queue-item ${item.id === selected?.id ? "active" : ""}`}
+                  onClick={() => setSelectedId(item.id)}
+                >
+                  <span className="submission-main">
+                    <span className="submission-title">{item.title}</span>
+                    <span className="submission-date">{formatDate(item.createdAt)}</span>
+                  </span>
+                  <span className={`badge ${item.reviewStatus}`}>{STATUS_LABELS[item.reviewStatus]}</span>
+                </button>
+              ))
+            )}
+          </div>
+        </aside>
+
+        {selected ? (
+          <ReviewDetail
+            key={selected.id}
+            submission={selected}
+            professorKey={professorKey}
+            onUpdated={replace}
+            onNext={next}
+          />
+        ) : (
+          <div className="detail">
+            <p className="empty">{loading ? "Cargando entregas…" : "Elige una entrega de la lista."}</p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
-function ReviewCard({
+type Draft = {
+  status: ReviewStatus;
+  feedback: string;
+  title: string;
+  notes: ReviewNote[];
+};
+
+function ReviewDetail({
   submission,
   professorKey,
   onUpdated,
+  onNext,
 }: {
   submission: Submission;
   professorKey: string;
   onUpdated: (submission: Submission) => void;
+  onNext: () => void;
 }) {
-  const [status, setStatus] = useState<ReviewStatus>(submission.reviewStatus);
-  const [feedback, setFeedback] = useState(submission.feedback);
-  const [title, setTitle] = useState(submission.title);
+  const [draft, setDraft] = useState<Draft>(() => ({
+    status: submission.reviewStatus,
+    feedback: submission.feedback,
+    title: submission.title,
+    notes: submission.reviewNotes,
+  }));
+  const [editingLine, setEditingLine] = useState<number | null>(null);
+  const [noteText, setNoteText] = useState("");
+  const [noteKind, setNoteKind] = useState<NoteKind>("error");
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
+  const [runStdin, setRunStdin] = useState(submission.stdin);
+  const [run, setRun] = useState<(RunResult & { console: string }) | null>(null);
+  const [running, setRunning] = useState(false);
+
+  const lines = useMemo(() => submission.code.split("\n"), [submission.code]);
+  const storageKey = `${DRAFT_PREFIX}${submission.id}`;
+
+  // Borrador local: la revisión a medias no se pierde al recargar, pero tampoco
+  // se publica sola.
   useEffect(() => {
-    setStatus(submission.reviewStatus);
-    setFeedback(submission.feedback);
-    setTitle(submission.title);
-  }, [submission]);
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (raw) {
+        const stored = JSON.parse(raw) as Draft;
+        if (stored && typeof stored === "object") {
+          setDraft((current) => ({ ...current, ...stored, notes: stored.notes ?? current.notes }));
+        }
+      }
+    } catch {
+      // el borrador local es una comodidad
+    }
+  }, [storageKey]);
 
-  const dirty =
-    status !== submission.reviewStatus ||
-    feedback !== submission.feedback ||
-    title.trim() !== submission.title;
+  useEffect(() => {
+    const id = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(storageKey, JSON.stringify(draft));
+      } catch {
+        // idem
+      }
+    }, 300);
+    return () => window.clearTimeout(id);
+  }, [draft, storageKey]);
 
-  async function save() {
+  const notesByLine = useMemo(() => {
+    const map = new Map<number, ReviewNote[]>();
+    for (const note of draft.notes) {
+      const list = map.get(note.line) ?? [];
+      list.push(note);
+      map.set(note.line, list);
+    }
+    return map;
+  }, [draft.notes]);
+
+  function openEditor(line: number) {
+    setEditingLine(line);
+    setNoteText("");
+    setNoteKind("error");
+  }
+
+  function addNote() {
+    const body = noteText.trim();
+    if (!body || editingLine == null) return;
+    const note: ReviewNote = {
+      id: `n_${Math.random().toString(36).slice(2, 10)}`,
+      line: editingLine,
+      kind: noteKind,
+      body,
+      createdAt: new Date().toISOString(),
+    };
+    setDraft((current) => ({ ...current, notes: [...current.notes, note].sort((a, b) => a.line - b.line) }));
+    setEditingLine(null);
+    setNoteText("");
+  }
+
+  function removeNote(id: string) {
+    setDraft((current) => ({ ...current, notes: current.notes.filter((note) => note.id !== id) }));
+  }
+
+  async function publish(andNext = false) {
     setSaving(true);
     setResult(null);
     try {
       const response = await fetch(`/api/submissions/${submission.id}/review`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${professorKey}`,
-        },
-        body: JSON.stringify({ status, feedback, title: title.trim() }),
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${professorKey}` },
+        body: JSON.stringify({
+          status: draft.status,
+          feedback: draft.feedback,
+          title: draft.title.trim(),
+          notes: draft.notes.map(({ id, line, kind, body, createdAt }) => ({
+            id,
+            line,
+            kind,
+            body,
+            createdAt,
+          })),
+        }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data?.error ?? "No se pudo guardar la revisión.");
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data?.error ?? `El servidor respondió ${response.status}.`);
       onUpdated(data.submission);
-      setResult({ kind: "success", text: "Revisión guardada." });
+      try {
+        window.localStorage.removeItem(storageKey);
+      } catch {
+        // nada que limpiar
+      }
+      setResult({ kind: "success", text: "Revisión publicada." });
+      if (andNext) onNext();
     } catch (error) {
       setResult({
         kind: "error",
@@ -343,79 +474,253 @@ function ReviewCard({
     }
   }
 
+  async function runStudentCode() {
+    setRunning(true);
+    setRun(null);
+    try {
+      const response = await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: submission.code, stdin: runStdin, mode: "batch" }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.error ?? "No se pudo ejecutar.");
+      setRun(data);
+    } catch (error) {
+      setResult({
+        kind: "error",
+        text: error instanceof Error ? error.message : "No se pudo ejecutar el código.",
+      });
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  const dirty =
+    draft.status !== submission.reviewStatus ||
+    draft.feedback !== submission.feedback ||
+    draft.title.trim() !== submission.title ||
+    JSON.stringify(draft.notes.map((n) => [n.line, n.kind, n.body])) !==
+      JSON.stringify(submission.reviewNotes.map((n) => [n.line, n.kind, n.body]));
+
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <span className="tab">{submission.title}</span>
-        <span className="grow" />
+    <div className="detail">
+      <div className="detail-head">
+        <h1 style={{ fontSize: 16, margin: 0 }}>{submission.title}</h1>
+        <span className={`badge ${submission.reviewStatus}`}>{STATUS_LABELS[submission.reviewStatus]}</span>
         <span className="muted-chip">{formatDate(submission.createdAt)}</span>
-        <span className={`badge ${submission.reviewStatus}`}>
-          {STATUS_LABELS[submission.reviewStatus]}
-        </span>
+        <span className="grow" />
+        <span className="muted-chip">{lines.length} líneas</span>
+        <span className="muted-chip">{draft.notes.length} notas</span>
       </div>
-      <div className="panel-body">
-        <div className="review-grid">
-          <div>
-            <div className="block-label">Código entregado</div>
-            <pre className="code-block tall">{submission.code}</pre>
 
-            <div className="two-up">
-              <div>
-                <div className="block-label">Entrada (stdin)</div>
-                <pre className="code-block">{submission.stdin || "(vacía)"}</pre>
+      <div className="detail-grid">
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <section className="card">
+            <div className="card-head">
+              <span>main.cpp</span>
+              <span className="grow" />
+              <span>haz clic en una línea para dejar una nota</span>
+            </div>
+            <div className="code-review">
+              {lines.map((text, index) => {
+                const number = index + 1;
+                const notes = notesByLine.get(number) ?? [];
+                return (
+                  <div key={number}>
+                    <div
+                      className={`code-line ${notes.length ? "has-note" : ""}`}
+                      onClick={() => openEditor(number)}
+                    >
+                      <span className="ln">{number}</span>
+                      <span className="add" aria-hidden>
+                        +
+                      </span>
+                      <span className="src">{text ? highlightCpp(text, String(number)) : " "}</span>
+                    </div>
+
+                    {notes.map((note) => (
+                      <div key={note.id} className="line-note">
+                        <span />
+                        <div className="body">
+                          <div className={`note ${note.kind}`}>
+                            <span className="note-kind">{NOTE_LABELS[note.kind]}</span>
+                            <p>{note.body}</p>
+                          </div>
+                          <div className="note-actions">
+                            <button type="button" className="ghost" onClick={() => removeNote(note.id)}>
+                              Borrar nota
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+
+                    {editingLine === number && (
+                      <div className="line-note">
+                        <span />
+                        <div className="body">
+                          <div className="kind-picker">
+                            {NOTE_KINDS.map((kind) => (
+                              <button
+                                key={kind}
+                                type="button"
+                                className={`${kind} ${noteKind === kind ? "active" : ""}`}
+                                onClick={() => setNoteKind(kind)}
+                              >
+                                {NOTE_LABELS[kind]}
+                              </button>
+                            ))}
+                          </div>
+                          <textarea
+                            autoFocus
+                            value={noteText}
+                            maxLength={2000}
+                            placeholder={`Nota para la línea ${number}`}
+                            onChange={(event) => setNoteText(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) addNote();
+                              if (event.key === "Escape") setEditingLine(null);
+                            }}
+                          />
+                          <div className="note-actions">
+                            <button type="button" className="primary" onClick={addNote} disabled={!noteText.trim()}>
+                              Añadir nota
+                            </button>
+                            <button type="button" className="ghost" onClick={() => setEditingLine(null)}>
+                              Cancelar
+                            </button>
+                            <span className="hint">Ctrl+Enter añade</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          <section className="card">
+            <div className="card-head">
+              <span>Compilación y ejecución guardadas por el alumno</span>
+            </div>
+            <div className="card-body">
+              <pre className="code-block">
+                {submission.compilerOutput || "(el alumno no ejecutó antes de entregar)"}
+              </pre>
+            </div>
+          </section>
+
+          <section className="card">
+            <div className="card-head">
+              <span>Ejecutar este código ahora</span>
+              <span className="grow" />
+              {run && <span className="muted-chip">{run.statusLabel}</span>}
+            </div>
+            <div className="card-body">
+              <label className="field">
+                <span>Entrada (stdin)</span>
+                <textarea
+                  rows={3}
+                  value={runStdin}
+                  spellCheck={false}
+                  onChange={(event) => setRunStdin(event.target.value)}
+                />
+              </label>
+              <div className="note-actions">
+                <button type="button" onClick={() => void runStudentCode()} disabled={running}>
+                  {running ? "Ejecutando…" : "Compilar y ejecutar"}
+                </button>
+                <button type="button" className="ghost" onClick={() => setRunStdin(submission.stdin)}>
+                  Usar la entrada del alumno
+                </button>
               </div>
-              <div>
-                <div className="block-label">Compilación y ejecución</div>
-                <pre className="code-block">
-                  {submission.compilerOutput || "(el alumno no ejecutó antes de entregar)"}
-                </pre>
+              {run && <pre className="code-block" style={{ marginTop: 12 }}>{run.console}</pre>}
+            </div>
+          </section>
+        </div>
+
+        <div className="review-side">
+          <section className="card">
+            <div className="card-head">
+              <span>Revisión</span>
+              {dirty && <span className="muted-chip">sin publicar</span>}
+            </div>
+            <div className="card-body">
+              <label className="field">
+                <span>Nombre del ejercicio</span>
+                <input
+                  type="text"
+                  value={draft.title}
+                  maxLength={200}
+                  onChange={(event) => setDraft((d) => ({ ...d, title: event.target.value }))}
+                />
+              </label>
+              <label className="field">
+                <span>Estado</span>
+                <select
+                  value={draft.status}
+                  onChange={(event) => setDraft((d) => ({ ...d, status: event.target.value as ReviewStatus }))}
+                >
+                  {REVIEW_STATUSES.map((value) => (
+                    <option key={value} value={value}>
+                      {STATUS_LABELS[value]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Notas generales</span>
+                <textarea
+                  rows={8}
+                  value={draft.feedback}
+                  onChange={(event) => setDraft((d) => ({ ...d, feedback: event.target.value }))}
+                  placeholder="Qué está bien, qué hay que corregir y por qué."
+                />
+              </label>
+              <div className="note-actions">
+                <button type="button" className="primary" onClick={() => void publish(false)} disabled={saving}>
+                  {saving ? "Publicando…" : "Publicar revisión"}
+                </button>
+                <button type="button" onClick={() => void publish(true)} disabled={saving}>
+                  Publicar y siguiente
+                </button>
+              </div>
+              {result && (
+                <span className={`notice ${result.kind}`} style={{ display: "block", marginTop: 10 }}>
+                  {result.text}
+                </span>
+              )}
+              <div className="meta-row" style={{ marginTop: 10 }}>
+                <span>Revisada: {formatDate(submission.reviewedAt)}</span>
+                <span>id: {submission.id}</span>
               </div>
             </div>
-          </div>
+          </section>
 
-          <div className="review-controls">
-            <label className="field">
-              <span>Nombre del ejercicio</span>
-              <input
-                type="text"
-                value={title}
-                maxLength={200}
-                onChange={(event) => setTitle(event.target.value)}
-              />
-            </label>
-            <label className="field">
-              <span>Estado</span>
-              <select
-                value={status}
-                onChange={(event) => setStatus(event.target.value as ReviewStatus)}
-              >
-                {REVIEW_STATUSES.map((value) => (
-                  <option key={value} value={value}>
-                    {STATUS_LABELS[value]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Notas para el alumno</span>
-              <textarea
-                rows={10}
-                value={feedback}
-                onChange={(event) => setFeedback(event.target.value)}
-                placeholder="Qué está bien, qué hay que corregir y por qué."
-              />
-            </label>
-            <button type="button" className="primary" onClick={save} disabled={saving || !dirty}>
-              {saving ? "Guardando…" : dirty ? "Guardar revisión" : "Sin cambios"}
-            </button>
-            <div className="meta-row">
-              <span>Revisada: {formatDate(submission.reviewedAt)}</span>
-              <span>id: {submission.id}</span>
-            </div>
-            {result && <span className={`notice ${result.kind}`}>{result.text}</span>}
-          </div>
+          {draft.notes.length > 0 && (
+            <section className="card">
+              <div className="card-head">
+                <span>Notas por línea</span>
+                <span className="grow" />
+                <span className="muted-chip">{draft.notes.length}</span>
+              </div>
+              <div className="card-body">
+                <ul className="note-list">
+                  {draft.notes.map((note) => (
+                    <li key={note.id} className={`note ${note.kind}`}>
+                      <span className="note-line">línea {note.line}</span>
+                      <span className="note-kind">{NOTE_LABELS[note.kind]}</span>
+                      <p>{note.body}</p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </section>
+          )}
         </div>
       </div>
-    </section>
+    </div>
   );
 }

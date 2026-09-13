@@ -4,9 +4,15 @@ import { LIMITS } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
-export const maxDuration = 30;
+export const maxDuration = 60;
 
-/** POST /api/run — compila y ejecuta C++ de verdad. */
+/**
+ * POST /api/run — compila y ejecuta C++ de verdad.
+ * { code, stdin, mode?: "interactive" | "batch" }
+ *
+ * En modo "interactive" la salida se corta en el punto exacto en el que el
+ * programa pide entrada; en "batch" se devuelve la ejecución completa.
+ */
 export async function POST(request: Request) {
   try {
     const body = await readJson(request);
@@ -19,7 +25,9 @@ export async function POST(request: Request) {
     }
 
     const stdin = str(body.stdin).slice(0, LIMITS.stdin);
-    const result = await runCpp(code, stdin);
+    const mode = body.mode === "interactive" ? "interactive" : "batch";
+
+    const result = await runCpp(code, stdin, { mode, signal: request.signal });
     return json({ ...result, console: formatRunResult(result) });
   } catch (error) {
     return serverError(error);
